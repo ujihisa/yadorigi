@@ -35,29 +35,11 @@ data PrimExpr
 
 data PatternTree
     = DCPattern String [PatternTree] {- data constructor pattern -}
-    | TuplePattern [PatternTree] {- tuple pattern -}
-    | ConsPattern PatternTree PatternTree
-          {- construct pattern (including list pattern) -}
+    | ConsPattern PatternTree PatternTree {- construct pattern -}
+    | ListPattern [PatternTree] {- list pattern -}
     | NPlusKPattern PatternTree Int {- construct pattern -}
     | BindPattern String {- bind pattern (including wild card) -}
     | ConstantPattern ConstantValue {- constant pattern-}
-
--- Composed Constructors
-
-atomicExpr :: Position -> String -> Expr
-atomicExpr pos str = Expr pos $ AtomicPrimExpr str
-
-applyFunctionExpr :: Position -> ApplyFunction -> Expr
-applyFunctionExpr pos app = Expr pos $ ApplyFunctionPrimExpr app
-
-bracketExpr :: Position -> Bracket -> Expr
-bracketExpr pos bracket = Expr pos $ BracketPrimExpr bracket
-
-listExpr :: Position -> [Expr] -> Expr
-listExpr pos list = Expr pos $ ListPrimExpr list
-
-ifExpr :: Position -> IfBlock -> Expr
-ifExpr pos ifBlock = Expr pos $ IfPrimExpr ifBlock
 
 -- Output Format
 
@@ -84,6 +66,23 @@ instance Show PrimExpr where
     show (ListPrimExpr list) = show list
     show (IfPrimExpr expr) = show expr
 
+-- Composed Data Constructors
+
+atomicExpr :: Position -> String -> Expr
+atomicExpr pos = Expr pos.AtomicPrimExpr
+
+applyFunctionExpr :: Position -> ApplyFunction -> Expr
+applyFunctionExpr pos = Expr pos.ApplyFunctionPrimExpr
+
+bracketExpr :: Position -> Bracket -> Expr
+bracketExpr pos = Expr pos.BracketPrimExpr
+
+listExpr :: Position -> [Expr] -> Expr
+listExpr pos = Expr pos.ListPrimExpr
+
+ifExpr :: Position -> IfBlock -> Expr
+ifExpr pos = Expr pos.IfPrimExpr
+
 -- Parser Combinators
 
 headPlusTail :: GenParser tok st a -> GenParser tok st a -> GenParser tok st [a]
@@ -96,11 +95,10 @@ returnConst :: b -> GenParser tok st a -> GenParser tok st b
 returnConst x p
     = p >>= const (return x)
 
-testPos :: (Show tok) => (Position -> Bool)
-    -> Position -> GenParser tok st a -> GenParser tok st a
-testPos ptest pos parser
-    = if ptest pos
-          then parser
+testPos :: (Show tok) => (Position -> Bool) -> Position -> GenParser tok st ()
+testPos posTest pos
+    = if posTest pos
+          then (return ())
           else (do eof >>= const (unexpected "end of file")
                    unexpected "token position")
 
@@ -128,13 +126,13 @@ nextPos str pos = foldl countUpPos pos str
 
 parseToken :: (String -> t) -> (Position -> Bool)
     -> (GenParser Char PState String) -> (GenParser Char PState (PlusPos t))
-parseToken conv ptest strParser
+parseToken conv posTest strParser
     = do (PState currentPos) <- getState
-         testPos ptest currentPos
-             (do token <- strParser
-                 whitespace <- spacesAndComments
-                 setState (PState (nextPos (token++whitespace) currentPos))
-                 return (PlusPos currentPos (conv token)))
+         testPos posTest currentPos
+         token <- strParser
+         whitespace <- spacesAndComments
+         setState (PState (nextPos (token++whitespace) currentPos))
+         return (PlusPos currentPos (conv token))
 
 spaceToken :: GenParser Char PState String
 spaceToken = many1 space
@@ -156,7 +154,7 @@ spacesAndComments
          return $ concat body
 
 nameToken :: (Position -> Bool) -> GenParser Char PState (PlusPos String)
-nameToken ptest = parseToken id ptest $ try
+nameToken posTest = parseToken id posTest $ try
     (do str <- headPlusTail (letter <|> char '_') (alphaNum <|> char '_')
             <|> many1 (oneOf "!#$%&*+-./:<=>?@^")
         (if (elem str reservedWord)
@@ -164,7 +162,7 @@ nameToken ptest = parseToken id ptest $ try
             else return str))
 
 numberToken :: (Position -> Bool) -> GenParser Char PState (PlusPos String)
-numberToken ptest = parseToken id ptest $
+numberToken posTest = parseToken id posTest $
     (try $ do string "0x"
               num <- many1 hexDigit
               return ("0x"++num))
@@ -173,62 +171,68 @@ numberToken ptest = parseToken id ptest $
            return (integer++fractional)
 
 eofToken :: (Position -> Bool) -> GenParser Char PState (PlusPos ())
-eofToken ptest = parseToken (const ()) ptest $ returnConst "" eof
+eofToken posTest = parseToken (const ()) posTest $ returnConst "" eof
 
 -- Expression Parser
 
 exprParser :: [OperatorAssocInfo] -> Int
-    -> (Position -> Bool) -> GenParser Char PState Expr
-exprParser opinfo 11 ptest
-    = bracketParser opinfo ptest <|> listParser opinfo ptest
-          <|> nameParser opinfo ptest <|> numberParser opinfo ptest
-exprParser opinfo 10 ptest
-    = chainl1 (exprParser opinfo 11 ptest) (return apply)
+    -> (Position -> Bool) -> (Position -> Bool) -> GenParser Char PState Expr
+exprParser opinfo 11 headPosTest posTest
+    = bracketParser opinfo headPosTest posTest
+    <|> listParser opinfo headPosTest posTest
+    <|> nameParser opinfo headPosTest posTest
+    <|> numberParser opinfo headPosTest posTest
+exprParser opinfo 10 headPosTest posTest
+    = do result@(Expr pos _) <-
+             chainl1 (exprParser opinfo 11 (const True) posTest) (return apply)
+         testPos headPosTest pos
+         return result
       where
           apply l@(Expr pos _) r = applyFunctionExpr pos $ ApplyFunction l r
-exprParser opinfo (-1) ptest
-    = ifParser opinfo ptest <|> exprParser opinfo 0 ptest
-exprParser opinfo n ptest
-    = exprParser opinfo (n+1) ptest
+exprParser opinfo (-1) headPosTest posTest
+    = ifParser opinfo headPosTest posTest
+    <|> exprParser opinfo 0 headPosTest posTest
+exprParser opinfo n headPosTest posTest
+    = exprParser opinfo (n+1) headPosTest posTest
 
-nameParser :: [OperatorAssocInfo] -> (Position -> Bool)
-    -> GenParser Char PState Expr
-nameParser opinfo ptest
-    = do (PlusPos pos body) <- nameToken ptest
+nameParser :: [OperatorAssocInfo]
+    -> (Position -> Bool) -> (Position -> Bool) -> GenParser Char PState Expr
+nameParser opinfo headPosTest posTest
+    = do (PlusPos pos body) <- nameToken headPosTest
          return $ atomicExpr pos body
 
-numberParser :: [OperatorAssocInfo] -> (Position -> Bool)
-    -> GenParser Char PState Expr
-numberParser opinfo ptest
-    = do (PlusPos pos body) <- numberToken ptest
+numberParser :: [OperatorAssocInfo]
+    -> (Position -> Bool) -> (Position -> Bool) -> GenParser Char PState Expr
+numberParser opinfo headPosTest posTest
+    = do (PlusPos pos body) <- numberToken headPosTest
          return $ atomicExpr pos body
 
 listParser :: [OperatorAssocInfo]
-    -> (Position -> Bool) -> GenParser Char PState Expr
-listParser opinfo ptest
-    = do (PlusPos pos _) <- parseToken (const ()) ptest (string "[")
-         body <- sepBy1 (exprParser opinfo (-10) ptest)
-             (parseToken (const ()) ptest (string ","))
-         parseToken (const ()) ptest (string "]")
+    -> (Position -> Bool) -> (Position -> Bool) -> GenParser Char PState Expr
+listParser opinfo headPosTest posTest
+    = do (PlusPos pos _) <- parseToken (const ()) headPosTest (string "[")
+         body <- sepBy (exprParser opinfo (-10) (const True) posTest)
+             (parseToken (const ()) posTest (string ","))
+         parseToken (const ()) posTest (string "]")
          return $ listExpr pos body
 
 bracketParser :: [OperatorAssocInfo]
- -> (Position -> Bool) -> GenParser Char PState Expr
-bracketParser opinfo ptest
-    = do (PlusPos pos _) <- parseToken (const ()) ptest (string "(")
-         body <- exprParser opinfo (-10) ptest
-         parseToken (const ()) ptest (string ")")
+    -> (Position -> Bool) -> (Position -> Bool) -> GenParser Char PState Expr
+bracketParser opinfo headPosTest posTest
+    = do (PlusPos pos _) <- parseToken (const ()) headPosTest (string "(")
+         body <- exprParser opinfo (-10) (const True) posTest
+         parseToken (const ()) posTest (string ")")
          return $ bracketExpr pos $ Bracket body
 
 ifParser :: [OperatorAssocInfo]
-    -> (Position -> Bool) -> GenParser Char PState Expr
-ifParser opinfo ptest
-    = do parseToken (const ()) ptest (keyword "if")
-         c@(Expr pos _) <- exprParser opinfo (-1) ptest
-         parseToken (const ()) ptest (keyword "then")
-         t <- exprParser opinfo (-1) ptest
-         parseToken (const ()) ptest (keyword "else")
-         f <- exprParser opinfo (-1) ptest
+    -> (Position -> Bool) -> (Position -> Bool) -> GenParser Char PState Expr
+ifParser opinfo headPosTest posTest
+    = do parseToken (const ()) headPosTest (keyword "if")
+         c@(Expr pos _) <- exprParser opinfo (-1) (const True) posTest
+         parseToken (const ()) posTest (keyword "then")
+         t <- exprParser opinfo (-1) (const True) posTest
+         parseToken (const ()) posTest (keyword "else")
+         f <- exprParser opinfo (-1) (const True) posTest
          return $ ifExpr pos $ IfBlock c t f
 
 -- Pattern Match Parser
@@ -239,10 +243,10 @@ ifParser opinfo ptest
 
 globalParser :: GenParser Char PState Expr
 globalParser
-    = let ptest = const True in
-      do parseToken (const ()) ptest (return "")
-         result <- exprParser [] (-10) ptest
-         eofToken ptest
+    = let posTest = const True in
+      do parseToken (const ()) posTest (return "")
+         result <- exprParser [] (-10) posTest posTest
+         eofToken posTest
          return result
 
 -- Parser Tester
