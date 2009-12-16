@@ -3,19 +3,18 @@ import Text.ParserCombinators.Parsec
 
 -- Data Types
 
-type Position = (Int,Int)
+data Position = Position Int Int
 
 data PState = PState Position
 
 data PlusPos body = PlusPos Position body
 
 
-data OperatorAssocInfo = Prefix | Infixl | Infix | Infixr
-
-data OperatorInfo = OperatorInfo String OperatorAssocInfo Int
-
-
-data ConstantValue = ConstantInt Int
+data Literal
+    = LiteralInt Int
+    | LiteralFloat Float
+    | LiteralChar Char
+    | LiteralString String
 
 data ApplyFunction = ApplyFunction Expr Expr
 
@@ -33,18 +32,18 @@ data PrimExpr
     | IfPrimExpr IfBlock
 
 
-data PatternTree
-    = DCPattern String [PatternTree] {- data constructor pattern -}
-    | ConsPattern PatternTree PatternTree {- construct pattern -}
-    | ListPattern [PatternTree] {- list pattern -}
-    | NPlusKPattern PatternTree Int {- construct pattern -}
+data PatternMatch
+    = AsPattern PatternMatch PatternMatch {- as pattern -}
+    | DCPattern String [PatternMatch] {- data constructor pattern -}
+    | ConsPattern PatternMatch PatternMatch {- construct pattern -}
+    | ListPattern [PatternMatch] {- list pattern -}
     | BindPattern String {- bind pattern (including wild card) -}
-    | ConstantPattern ConstantValue {- constant pattern-}
+    | LiteralPattern Literal {- literal pattern -}
 
 -- Output Format
 
 instance (Show body) => Show (PlusPos body) where
-    show (PlusPos (line,column) body)
+    show (PlusPos (Position line column) body)
         = show line++","++show column++" "++show body
 
 instance Show ApplyFunction where
@@ -102,10 +101,10 @@ testPos posTest pos
           else (do eof >>= const (unexpected "end of file")
                    unexpected "token position")
 
-keyword :: String -> GenParser Char st String
+keyword :: String -> CharParser st String
 keyword str
     = try (do result <- string str
-              notFollowedBy alphaNum
+              notFollowedBy (alphaNum <|> char '_')
               return result)
 
 -- Constant Values
@@ -114,18 +113,22 @@ reservedWord :: [String]
 reservedWord
     = ["if","then","else"]
 
+reservedSymbol :: [String]
+reservedSymbol
+    = ["=","@"]
+
 -- Position
 
 nextPos :: String -> Position -> Position
 nextPos str pos = foldl countUpPos pos str
     where
-        countUpPos (line,column) '\n' = (line+1,0)
-        countUpPos (line,column) _ = (line,column+1)
+        countUpPos (Position line column) '\n' = Position (line+1) 0
+        countUpPos (Position line column) _ = Position line (column+1)
 
 -- Tokenizer
 
 parseToken :: (String -> t) -> (Position -> Bool)
-    -> (GenParser Char PState String) -> (GenParser Char PState (PlusPos t))
+    -> (CharParser PState String) -> (CharParser PState (PlusPos t))
 parseToken conv posTest strParser
     = do (PState currentPos) <- getState
          testPos posTest currentPos
@@ -134,34 +137,59 @@ parseToken conv posTest strParser
          setState (PState (nextPos (token++whitespace) currentPos))
          return (PlusPos currentPos (conv token))
 
-spaceToken :: GenParser Char PState String
+spaceToken :: CharParser PState String
 spaceToken = many1 space
 
-lineCommentToken :: GenParser Char PState String
+lineCommentToken :: CharParser PState String
 lineCommentToken
     = between (string "--") (returnConst () (char '\n') <|>  eof) (many anyChar)
-         >>= (return.(++"\n").("--"++))
+         >>= (return.("--"++).(++"\n"))
 
-blockCommentToken :: GenParser Char PState String
+blockCommentToken :: CharParser PState String
 blockCommentToken
     = do string "{-"
          body <- manyTill anyChar (try (string "-}"))
-         return ("{-"++body++"-}")
+         return ("{-" ++ body ++ "-}")
 
-spacesAndComments :: GenParser Char PState String
+spacesAndComments :: CharParser PState String
 spacesAndComments
     = do body <- many (spaceToken <|> lineCommentToken <|> blockCommentToken)
          return $ concat body
 
-nameToken :: (Position -> Bool) -> GenParser Char PState (PlusPos String)
-nameToken posTest = parseToken id posTest $ try
-    (do str <- headPlusTail (letter <|> char '_') (alphaNum <|> char '_')
-            <|> many1 (oneOf "!#$%&*+-./:<=>?@^")
-        (if (elem str reservedWord)
-            then unexpected $ show str
-            else return str))
+labelToken :: (CharParser PState Char) -> (CharParser PState Char)
+    -> [String] -> (Position -> Bool) -> CharParser PState (PlusPos String)
+labelToken hparser tparser reservedList posTest
+    = parseToken id posTest $ try
+        (do str <- headPlusTail hparser tparser
+            (if (elem str reservedList)
+                then unexpected $ show str
+                else return str))
 
-numberToken :: (Position -> Bool) -> GenParser Char PState (PlusPos String)
+nameToken :: (Position -> Bool) -> CharParser PState (PlusPos String)
+nameToken posTest = labelToken
+    (alphaNum <|> char '_') (alphaNum <|> char '_') reservedWord posTest
+
+opToken :: (Position -> Bool) -> CharParser PState (PlusPos String)
+opToken posTest = labelToken (oneOf "!#$%&*+-./:<=>?@^")
+    (oneOf "!#$%&*+-./:<=>?@^") reservedSymbol posTest
+
+vNameToken :: (Position -> Bool) -> CharParser PState (PlusPos String)
+vNameToken posTest = labelToken
+    (lower <|> char '_') (alphaNum <|> char '_') reservedWord posTest
+
+vOpToken :: (Position -> Bool) -> CharParser PState (PlusPos String)
+vOpToken posTest = labelToken (oneOf "!#$%&*+-./<=>?@^")
+    (oneOf "!#$%&*+-./:<=>?@^") reservedSymbol posTest
+
+cNameToken :: (Position -> Bool) -> CharParser PState (PlusPos String)
+cNameToken posTest = labelToken
+    upper (alphaNum <|> char '_') reservedWord posTest
+
+cOpToken :: (Position -> Bool) -> CharParser PState (PlusPos String)
+cOpToken posTest = labelToken
+    (char ':') (oneOf "!#$%&*+-./:<=>?@^") reservedSymbol posTest
+
+numberToken :: (Position -> Bool) -> CharParser PState (PlusPos String)
 numberToken posTest = parseToken id posTest $
     (try $ do string "0x"
               num <- many1 hexDigit
@@ -170,112 +198,123 @@ numberToken posTest = parseToken id posTest $
            fractional <- option "" $ headPlusTail (char '.') digit
            return (integer++fractional)
 
-eofToken :: (Position -> Bool) -> GenParser Char PState (PlusPos ())
+eofToken :: (Position -> Bool) -> CharParser PState (PlusPos ())
 eofToken posTest = parseToken (const ()) posTest $ returnConst "" eof
 
 -- Expression Parser
 
-exprParser :: [OperatorAssocInfo] -> Int
-    -> (Position -> Bool) -> (Position -> Bool) -> GenParser Char PState Expr
-exprParser opinfo 11 headPosTest posTest
-    = bracketParser opinfo headPosTest posTest
-    <|> listParser opinfo headPosTest posTest
-    <|> nameParser opinfo headPosTest posTest
-    <|> numberParser opinfo headPosTest posTest
-exprParser opinfo 10 headPosTest posTest
+exprParser :: Int
+    -> (Position -> Bool) -> (Position -> Bool) -> CharParser PState Expr
+exprParser (-1) headPosTest posTest
+    = ifParser headPosTest posTest <|> exprParser 0 headPosTest posTest
+exprParser 10 headPosTest posTest
     = do result@(Expr pos _) <-
-             chainl1 (exprParser opinfo 11 (const True) posTest) (return apply)
+             chainl1 (exprParser 11 posTest posTest) (return apply)
          testPos headPosTest pos
          return result
-      where
-          apply l@(Expr pos _) r = applyFunctionExpr pos $ ApplyFunction l r
-exprParser opinfo (-1) headPosTest posTest
-    = ifParser opinfo headPosTest posTest
-    <|> exprParser opinfo 0 headPosTest posTest
-exprParser opinfo n headPosTest posTest
-    = exprParser opinfo (n+1) headPosTest posTest
+    where
+        apply l@(Expr pos _) r = applyFunctionExpr pos $ ApplyFunction l r
+exprParser 11 headPosTest posTest
+    = bracketParser headPosTest posTest <|> listParser headPosTest posTest
+    <|> nameParser headPosTest posTest <|> numberParser headPosTest posTest
+exprParser n headPosTest posTest
+    = exprParser (n+1) headPosTest posTest
 
-nameParser :: [OperatorAssocInfo]
-    -> (Position -> Bool) -> (Position -> Bool) -> GenParser Char PState Expr
-nameParser opinfo headPosTest posTest
+nameParser :: (Position -> Bool) -> (Position -> Bool) -> CharParser PState Expr
+nameParser headPosTest posTest
     = do (PlusPos pos body) <- nameToken headPosTest
          return $ atomicExpr pos body
 
-numberParser :: [OperatorAssocInfo]
-    -> (Position -> Bool) -> (Position -> Bool) -> GenParser Char PState Expr
-numberParser opinfo headPosTest posTest
+numberParser
+    :: (Position -> Bool) -> (Position -> Bool) -> CharParser PState Expr
+numberParser headPosTest posTest
     = do (PlusPos pos body) <- numberToken headPosTest
          return $ atomicExpr pos body
 
-listParser :: [OperatorAssocInfo]
-    -> (Position -> Bool) -> (Position -> Bool) -> GenParser Char PState Expr
-listParser opinfo headPosTest posTest
+listParser :: (Position -> Bool) -> (Position -> Bool) -> CharParser PState Expr
+listParser headPosTest posTest
     = do (PlusPos pos _) <- parseToken (const ()) headPosTest (string "[")
-         body <- sepBy (exprParser opinfo (-10) (const True) posTest)
+         body <- sepBy (exprParser (-10) posTest posTest)
              (parseToken (const ()) posTest (string ","))
          parseToken (const ()) posTest (string "]")
          return $ listExpr pos body
 
-bracketParser :: [OperatorAssocInfo]
-    -> (Position -> Bool) -> (Position -> Bool) -> GenParser Char PState Expr
-bracketParser opinfo headPosTest posTest
+bracketParser
+    :: (Position -> Bool) -> (Position -> Bool) -> CharParser PState Expr
+bracketParser headPosTest posTest
     = do (PlusPos pos _) <- parseToken (const ()) headPosTest (string "(")
-         body <- exprParser opinfo (-10) (const True) posTest
+         body <- exprParser (-10) posTest posTest
          parseToken (const ()) posTest (string ")")
          return $ bracketExpr pos $ Bracket body
 
-ifParser :: [OperatorAssocInfo]
-    -> (Position -> Bool) -> (Position -> Bool) -> GenParser Char PState Expr
-ifParser opinfo headPosTest posTest
+ifParser :: (Position -> Bool) -> (Position -> Bool) -> CharParser PState Expr
+ifParser headPosTest posTest
     = do parseToken (const ()) headPosTest (keyword "if")
-         c@(Expr pos _) <- exprParser opinfo (-1) (const True) posTest
+         c@(Expr pos _) <- exprParser (-1) posTest posTest
          parseToken (const ()) posTest (keyword "then")
-         t <- exprParser opinfo (-1) (const True) posTest
+         t <- exprParser (-1) posTest posTest
          parseToken (const ()) posTest (keyword "else")
-         f <- exprParser opinfo (-1) (const True) posTest
+         f <- exprParser (-1) posTest posTest
          return $ ifExpr pos $ IfBlock c t f
 
 -- Pattern Match Parser
 
+{-
+patternParser :: Int -> (Position -> Bool) -> (Position -> Bool)
+    -> CharParser PState PatternMatch
+patternParser 0 headPosTest posTest
+    = 
+patternParser 10 headPosTest posTest
+    = 
 
+asPatternParser :: (Position -> Bool)
+    -> (Position -> Bool) -> CharParser PState PatternMatch
+asPatternParser headPosTest posTest
+    = do var <- vNameToken headPosTest
+         parseToken (const ()) posTest (string "@")
+         pattern <- patternParser 10 posTest posTest
+         return $ AsPattern (BindPattern var) pattern
+-}
 
 -- Global Parser
 
-globalParser :: GenParser Char PState Expr
+globalParser :: CharParser PState Expr
 globalParser
     = let posTest = const True in
       do parseToken (const ()) posTest (return "")
-         result <- exprParser [] (-10) posTest posTest
+         result <- exprParser (-10) posTest posTest
          eofToken posTest
          return result
 
 -- Parser Tester
 
 strParser :: String -> IO ()
-strParser str
-    = case runParser globalParser (PState (0,0)) "<string>" str of
+strParser input
+    = case runParser globalParser (PState (Position 0 0)) "<string>" input of
         Left err -> print err
         Right result -> print result
 
 interactiveParser :: IO ()
 interactiveParser
     = do input <- getInput
-         case runParser globalParser (PState (0,0)) "<interactive>" input of
+         case runParser globalParser
+                 (PState (Position 0 0)) "<interactive>" input of
              Left err -> print err
              Right result -> print result
-      where
-          getInput = do h <- getLine
-                        t <- if h == "" then return "" else getInput
-                        return (h++"\n"++t)
+    where
+        getInput = do h <- getLine
+                      t <- if h == "" then return "" else getInput
+                      return (h++"\n"++t)
 
 fileParser :: FilePath -> IO ()
 fileParser filename
-    = let myParseFromFile p s filename
-              = do input <- readFile filename
-                   return (runParser p s filename input) in
-      do result <- myParseFromFile
-             globalParser (PState (0,0)) filename
+    = do result <- myParseFromFile
+             globalParser (PState (Position 0 0)) filename
          case result of
              Left err -> print err
              Right result -> print result
+    where
+        myParseFromFile p s filename
+            = do input <- readFile filename
+                 return (runParser p s filename input)
 
