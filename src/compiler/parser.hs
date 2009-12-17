@@ -1,5 +1,6 @@
 
 import Text.ParserCombinators.Parsec
+import Data.Char
 
 -- Data Types
 
@@ -25,7 +26,8 @@ data IfBlock = IfBlock Expr Expr Expr
 data Expr = Expr Position PrimExpr
 
 data PrimExpr
-    = AtomicPrimExpr String
+    = LiteralPrimExpr Literal
+    | NamePrimExpr String
     | ApplyFunctionPrimExpr ApplyFunction
     | BracketPrimExpr Bracket
     | ListPrimExpr [Expr]
@@ -46,6 +48,12 @@ instance (Show body) => Show (PlusPos body) where
     show (PlusPos (Position line column) body)
         = show line++","++show column++" "++show body
 
+instance Show Literal where
+    show (LiteralInt i) = show i
+    show (LiteralFloat f) = show f
+    show (LiteralChar c) = show c
+    show (LiteralString s) = show s
+
 instance Show ApplyFunction where
     show (ApplyFunction func param) = "{"++show func++" "++show param++"}"
 
@@ -59,7 +67,8 @@ instance Show Expr where
     show (Expr pos primExpr) = show primExpr
 
 instance Show PrimExpr where
-    show (AtomicPrimExpr str) = str
+    show (LiteralPrimExpr literal) = show literal
+    show (NamePrimExpr name) = name
     show (ApplyFunctionPrimExpr expr) = show expr
     show (BracketPrimExpr expr) = show expr
     show (ListPrimExpr list) = show list
@@ -67,8 +76,11 @@ instance Show PrimExpr where
 
 -- Composed Data Constructors
 
-atomicExpr :: Position -> String -> Expr
-atomicExpr pos = Expr pos.AtomicPrimExpr
+literalExpr :: Position -> Literal -> Expr
+literalExpr pos = Expr pos.LiteralPrimExpr
+
+nameExpr :: Position -> String -> Expr
+nameExpr pos = Expr pos.NamePrimExpr
 
 applyFunctionExpr :: Position -> ApplyFunction -> Expr
 applyFunctionExpr pos = Expr pos.ApplyFunctionPrimExpr
@@ -127,6 +139,13 @@ nextPos str pos = foldl countUpPos pos str
 
 -- Tokenizer
 
+updatePos :: (CharParser PState String) -> (CharParser PState String)
+updatePos strParser
+    = do (PState currentPos) <- getState
+         str <- strParser
+         setState (PState (nextPos str currentPos))
+         return str
+
 parseToken :: (String -> t) -> (Position -> Bool)
     -> (CharParser PState String) -> (CharParser PState (PlusPos t))
 parseToken conv posTest strParser
@@ -167,7 +186,7 @@ labelToken hparser tparser reservedList posTest
 
 nameToken :: (Position -> Bool) -> CharParser PState (PlusPos String)
 nameToken posTest = labelToken
-    (alphaNum <|> char '_') (alphaNum <|> char '_') reservedWord posTest
+    (letter <|> char '_') (alphaNum <|> char '_') reservedWord posTest
 
 opToken :: (Position -> Bool) -> CharParser PState (PlusPos String)
 opToken posTest = labelToken (oneOf "!#$%&*+-./:<=>?@^")
@@ -189,17 +208,69 @@ cOpToken :: (Position -> Bool) -> CharParser PState (PlusPos String)
 cOpToken posTest = labelToken
     (char ':') (oneOf "!#$%&*+-./:<=>?@^") reservedSymbol posTest
 
-numberToken :: (Position -> Bool) -> CharParser PState (PlusPos String)
-numberToken posTest = parseToken id posTest $
-    (try $ do string "0x"
-              num <- many1 hexDigit
-              return ("0x"++num))
-    <|> do integer <- many1 digit
-           fractional <- option "" $ headPlusTail (char '.') digit
-           return (integer++fractional)
-
 eofToken :: (Position -> Bool) -> CharParser PState (PlusPos ())
 eofToken posTest = parseToken (const ()) posTest $ returnConst "" eof
+
+-- Literal Token
+
+numberToken :: (Position -> Bool) -> CharParser PState (PlusPos Literal)
+numberToken posTest
+    = do (PState currentPos) <- getState
+         integer <- many1 digit
+         fractional <- option "" $ headPlusTail (char '.') digit
+         updatePos $ return (integer++fractional)
+         return $ PlusPos currentPos $
+             if null fractional
+                 then LiteralInt $ read integer
+                 else LiteralFloat $ read (integer++fractional)
+
+hexToken :: (Position -> Bool) -> CharParser PState (PlusPos Literal)
+hexToken posTest
+    = try $ do (PState currentPos) <- getState
+               updatePos $ string "0x"
+               num <- many1 hexnum
+               return $ PlusPos currentPos $
+                   LiteralInt $ foldl (\c n -> c*16+n) 0 num
+    where
+        hexnum = do c <- updatePos (hexDigit >>= return.(:[])) >>= (return.head)
+                    if '0' <= c && c <= '9'
+                        then return $ ord c-ord '0'
+                        else return $ ord (toLower c)-ord 'a'+10
+
+strElem :: CharParser PState Char
+strElem
+    = do c <- noneOf "\\\"\'"
+         updatePos $ return [c]
+         return c
+  <|> do char '\\'
+         c <- oneOf "abfnrtv\\\"\'"
+         updatePos $ return ['\\',c]
+         return $ conv c
+    where { conv 'a' = '\a' ; conv 'b' = '\b' ; conv 'f' = '\f'
+          ; conv 'n' = '\n' ; conv 'r' = '\r' ; conv 't' = '\t'
+          ; conv 'v' = '\v' ; conv c = c }
+
+stringToken :: (Position -> Bool) -> CharParser PState (PlusPos Literal)
+stringToken posTest
+    = do (PState currentPos) <- getState
+         testPos posTest currentPos
+         between (updatePos $ string "\"") (updatePos $ string "\"")
+             (many strElem >>= \s -> return $
+             PlusPos currentPos $ LiteralString s)
+
+charToken :: (Position -> Bool) -> CharParser PState (PlusPos Literal)
+charToken posTest
+    = do (PState currentPos) <- getState
+         testPos posTest currentPos
+         between (updatePos $ string "\'") (updatePos $ string "\'")
+             (strElem >>= \c -> return $ PlusPos currentPos $ LiteralChar c)
+
+literalToken :: (Position -> Bool) -> CharParser PState (PlusPos Literal)
+literalToken posTest
+    = do literal <- hexToken posTest <|> numberToken posTest
+             <|> stringToken posTest <|> charToken posTest
+         parseToken (const ()) (const True) (return "")
+         return literal
 
 -- Expression Parser
 
@@ -216,20 +287,20 @@ exprParser 10 headPosTest posTest
         apply l@(Expr pos _) r = applyFunctionExpr pos $ ApplyFunction l r
 exprParser 11 headPosTest posTest
     = bracketParser headPosTest posTest <|> listParser headPosTest posTest
-    <|> nameParser headPosTest posTest <|> numberParser headPosTest posTest
+    <|> nameParser headPosTest posTest <|> literalParser headPosTest posTest
 exprParser n headPosTest posTest
     = exprParser (n+1) headPosTest posTest
 
 nameParser :: (Position -> Bool) -> (Position -> Bool) -> CharParser PState Expr
 nameParser headPosTest posTest
     = do (PlusPos pos body) <- nameToken headPosTest
-         return $ atomicExpr pos body
+         return $ nameExpr pos body
 
-numberParser
+literalParser
     :: (Position -> Bool) -> (Position -> Bool) -> CharParser PState Expr
-numberParser headPosTest posTest
-    = do (PlusPos pos body) <- numberToken headPosTest
-         return $ atomicExpr pos body
+literalParser headPosTest posTest
+    = do (PlusPos pos literal) <- literalToken headPosTest
+         return $ literalExpr pos literal
 
 listParser :: (Position -> Bool) -> (Position -> Bool) -> CharParser PState Expr
 listParser headPosTest posTest
@@ -265,7 +336,8 @@ patternParser :: Int -> (Position -> Bool) -> (Position -> Bool)
 patternParser 0 headPosTest posTest
     = 
 patternParser 10 headPosTest posTest
-    = 
+    = asPatternParser headPosTest posTest
+    <|> 
 
 asPatternParser :: (Position -> Bool)
     -> (Position -> Bool) -> CharParser PState PatternMatch
