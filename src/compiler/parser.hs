@@ -10,6 +10,8 @@ data PState = PState Position
 
 data PlusPos body = PlusPos Position body
 
+data LayoutInfo = LayoutInfo Bool Int
+
 
 data Literal
     = LiteralInt Int
@@ -33,14 +35,17 @@ data PrimExpr
     | ListPrimExpr [Expr]
     | IfPrimExpr IfBlock
 
+data PatternMatch = PatternMatch Position PrimPatternMatch
 
-data PatternMatch
-    = AsPattern PatternMatch PatternMatch {- as pattern -}
-    | DCPattern String [PatternMatch] {- data constructor pattern -}
-    | ConsPattern PatternMatch PatternMatch {- construct pattern -}
-    | ListPattern [PatternMatch] {- list pattern -}
-    | BindPattern String {- bind pattern (including wild card) -}
-    | LiteralPattern Literal {- literal pattern -}
+data PrimPatternMatch
+    = DCPrimPattern String [PatternMatch] {- data constructor pattern -}
+    | LiteralPrimPattern Literal {- literal pattern -}
+    | DCOpPrimPattern String PatternMatch PatternMatch
+        {- infix data constructor pattern -}
+    | ListPrimPattern [PatternMatch] {- list pattern -}
+    | BindPrimPattern String (Maybe PatternMatch)
+        {- bind pattern (including wild card pattern and as pattern) -}
+    | BracketPrimPattern PatternMatch {- Bracket Pattern -}
 
 -- Output Format
 
@@ -94,30 +99,28 @@ listExpr pos = Expr pos.ListPrimExpr
 ifExpr :: Position -> IfBlock -> Expr
 ifExpr pos = Expr pos.IfPrimExpr
 
--- Parser Combinators
 
-headPlusTail :: GenParser tok st a -> GenParser tok st a -> GenParser tok st [a]
-headPlusTail head tail
-    = do h <- head
-         t <- many tail
-         return (h:t)
+dcPattern :: Position -> String -> [PatternMatch] -> PatternMatch
+dcPattern pos str = PatternMatch pos.DCPrimPattern str
 
-returnConst :: b -> GenParser tok st a -> GenParser tok st b
-returnConst x p
-    = p >>= const (return x)
+literalPattern :: Position -> Literal -> PatternMatch
+literalPattern pos = PatternMatch pos.LiteralPrimPattern
 
-testPos :: (Show tok) => (Position -> Bool) -> Position -> GenParser tok st ()
-testPos posTest pos
-    = if posTest pos
-          then (return ())
-          else (do eof >>= const (unexpected "end of file")
-                   unexpected "token position")
+dcOpPattern :: Position -> String
+    -> PatternMatch -> PatternMatch -> PatternMatch
+dcOpPattern pos str pat = PatternMatch pos.DCOpPrimPattern str pat
 
-keyword :: String -> CharParser st String
-keyword str
-    = try (do result <- string str
-              notFollowedBy (alphaNum <|> char '_')
-              return result)
+listPattern :: Position -> [PatternMatch] -> PatternMatch
+listPattern pos = PatternMatch pos.ListPrimPattern
+
+bindPattern :: Position -> String -> PatternMatch
+bindPattern pos str = PatternMatch pos $ BindPrimPattern str Nothing
+
+asPattern :: Position -> String -> PatternMatch -> PatternMatch
+asPattern pos str = PatternMatch pos.BindPrimPattern str.Just
+
+bracketPattern :: Position -> PatternMatch -> PatternMatch
+bracketPattern pos = PatternMatch pos.BracketPrimPattern
 
 -- Constant Values
 
@@ -131,13 +134,19 @@ reservedSymbol
 
 -- Position
 
-nextPos :: String -> Position -> Position
-nextPos str pos = foldl countUpPos pos str
-    where
-        countUpPos (Position line column) '\n' = Position (line+1) 0
-        countUpPos (Position line column) _ = Position line (column+1)
+nextPosC :: Char -> Position -> Position
+nextPosC '\n' (Position line column) = Position (line+1) 0
+nextPosC _ (Position line column) = Position line (column+1)
 
--- Tokenizer
+nextPos :: String -> Position -> Position
+nextPos str pos = foldl (flip nextPosC) pos str
+
+updatePosC :: (CharParser PState Char) -> (CharParser PState Char)
+updatePosC parser
+    = do (PState currentPos) <- getState
+         c <- parser
+         setState (PState (nextPosC c currentPos))
+         return c
 
 updatePos :: (CharParser PState String) -> (CharParser PState String)
 updatePos strParser
@@ -146,11 +155,53 @@ updatePos strParser
          setState (PState (nextPos str currentPos))
          return str
 
-parseToken :: (String -> t) -> (Position -> Bool)
+-- Layout
+
+arbitraryLayout = LayoutInfo False 0
+
+checkLayout :: LayoutInfo -> Position -> Bool
+checkLayout (LayoutInfo False n) (Position line column) = n <= column
+checkLayout (LayoutInfo True n) (Position line column) = n == column
+
+arbitraryElemLayout :: LayoutInfo -> LayoutInfo
+arbitraryElemLayout (LayoutInfo t n) = LayoutInfo False n
+
+tailElemLayout :: LayoutInfo -> LayoutInfo
+tailElemLayout (LayoutInfo True n) = LayoutInfo False (n+1)
+tailElemLayout layout = layout
+
+-- Parser Combinators
+
+headPlusTail :: GenParser tok st a -> GenParser tok st a -> GenParser tok st [a]
+headPlusTail head tail
+    = do h <- head
+         t <- many tail
+         return (h:t)
+
+returnConst :: b -> GenParser tok st a -> GenParser tok st b
+returnConst x p
+    = p >>= const (return x)
+
+testPos :: (Show tok) => LayoutInfo -> Position -> GenParser tok st ()
+testPos layout pos
+    = if checkLayout layout pos
+          then return ()
+          else do eof >>= const (unexpected "end of file")
+                  unexpected "token position"
+
+keyword :: String -> CharParser st String
+keyword str = try $
+    do result <- string str
+       notFollowedBy (alphaNum <|> char '_')
+       return result
+
+-- Tokenizer
+
+parseToken :: (String -> t) -> LayoutInfo
     -> (CharParser PState String) -> (CharParser PState (PlusPos t))
-parseToken conv posTest strParser
+parseToken conv layout strParser
     = do (PState currentPos) <- getState
-         testPos posTest currentPos
+         testPos layout currentPos
          token <- strParser
          whitespace <- spacesAndComments
          setState (PState (nextPos (token++whitespace) currentPos))
@@ -176,63 +227,62 @@ spacesAndComments
          return $ concat body
 
 labelToken :: (CharParser PState Char) -> (CharParser PState Char)
-    -> [String] -> (Position -> Bool) -> CharParser PState (PlusPos String)
-labelToken hparser tparser reservedList posTest
-    = parseToken id posTest $ try
+    -> [String] -> LayoutInfo -> CharParser PState (PlusPos String)
+labelToken hparser tparser reservedList layout
+    = parseToken id layout $ try
         (do str <- headPlusTail hparser tparser
             (if (elem str reservedList)
                 then unexpected $ show str
                 else return str))
 
-nameToken :: (Position -> Bool) -> CharParser PState (PlusPos String)
-nameToken posTest = labelToken
-    (letter <|> char '_') (alphaNum <|> char '_') reservedWord posTest
+nameToken :: LayoutInfo -> CharParser PState (PlusPos String)
+nameToken layout = labelToken
+    (letter <|> char '_') (alphaNum <|> char '_') reservedWord layout
 
-opToken :: (Position -> Bool) -> CharParser PState (PlusPos String)
-opToken posTest = labelToken (oneOf "!#$%&*+-./:<=>?@^")
-    (oneOf "!#$%&*+-./:<=>?@^") reservedSymbol posTest
+opToken :: LayoutInfo -> CharParser PState (PlusPos String)
+opToken layout = labelToken (oneOf "!#$%&*+-./:<=>?@^")
+    (oneOf "!#$%&*+-./:<=>?@^") reservedSymbol layout
 
-vNameToken :: (Position -> Bool) -> CharParser PState (PlusPos String)
-vNameToken posTest = labelToken
-    (lower <|> char '_') (alphaNum <|> char '_') reservedWord posTest
+vNameToken :: LayoutInfo -> CharParser PState (PlusPos String)
+vNameToken layout = labelToken
+    (lower <|> char '_') (alphaNum <|> char '_') reservedWord layout
 
-vOpToken :: (Position -> Bool) -> CharParser PState (PlusPos String)
-vOpToken posTest = labelToken (oneOf "!#$%&*+-./<=>?@^")
-    (oneOf "!#$%&*+-./:<=>?@^") reservedSymbol posTest
+vOpToken :: LayoutInfo -> CharParser PState (PlusPos String)
+vOpToken layout = labelToken (oneOf "!#$%&*+-./<=>?@^")
+    (oneOf "!#$%&*+-./:<=>?@^") reservedSymbol layout
 
-cNameToken :: (Position -> Bool) -> CharParser PState (PlusPos String)
-cNameToken posTest = labelToken
-    upper (alphaNum <|> char '_') reservedWord posTest
+cNameToken :: LayoutInfo -> CharParser PState (PlusPos String)
+cNameToken layout = labelToken
+    upper (alphaNum <|> char '_') reservedWord layout
 
-cOpToken :: (Position -> Bool) -> CharParser PState (PlusPos String)
-cOpToken posTest = labelToken
-    (char ':') (oneOf "!#$%&*+-./:<=>?@^") reservedSymbol posTest
+cOpToken :: LayoutInfo -> CharParser PState (PlusPos String)
+cOpToken layout = labelToken
+    (char ':') (oneOf "!#$%&*+-./:<=>?@^") reservedSymbol layout
 
-eofToken :: (Position -> Bool) -> CharParser PState (PlusPos ())
-eofToken posTest = parseToken (const ()) posTest $ returnConst "" eof
+eofToken :: LayoutInfo -> CharParser PState (PlusPos ())
+eofToken layout = parseToken (const ()) layout $ returnConst "" eof
 
 -- Literal Token
 
-numberToken :: (Position -> Bool) -> CharParser PState (PlusPos Literal)
-numberToken posTest
+numberToken :: CharParser PState (PlusPos Literal)
+numberToken
     = do (PState currentPos) <- getState
-         integer <- many1 digit
-         fractional <- option "" $ headPlusTail (char '.') digit
-         updatePos $ return (integer++fractional)
+         integer <- updatePos $ many1 digit
+         fractional <- updatePos $ option "" $ headPlusTail (char '.') digit
          return $ PlusPos currentPos $
              if null fractional
                  then LiteralInt $ read integer
                  else LiteralFloat $ read (integer++fractional)
 
-hexToken :: (Position -> Bool) -> CharParser PState (PlusPos Literal)
-hexToken posTest
-    = try $ do (PState currentPos) <- getState
-               updatePos $ string "0x"
-               num <- many1 hexnum
-               return $ PlusPos currentPos $
-                   LiteralInt $ foldl (\c n -> c*16+n) 0 num
+hexToken :: CharParser PState (PlusPos Literal)
+hexToken = try $
+    do (PState currentPos) <- getState
+       updatePos $ string "0x"
+       num <- many1 hexnum
+       return $ PlusPos currentPos $
+           LiteralInt $ foldl (\c n -> c*16+n) 0 num
     where
-        hexnum = do c <- updatePos (hexDigit >>= return.(:[])) >>= (return.head)
+        hexnum = do c <- updatePosC hexDigit
                     if '0' <= c && c <= '9'
                         then return $ ord c-ord '0'
                         else return $ ord (toLower c)-ord 'a'+10
@@ -250,112 +300,103 @@ strElem
           ; conv 'n' = '\n' ; conv 'r' = '\r' ; conv 't' = '\t'
           ; conv 'v' = '\v' ; conv c = c }
 
-stringToken :: (Position -> Bool) -> CharParser PState (PlusPos Literal)
-stringToken posTest
+stringToken :: CharParser PState (PlusPos Literal)
+stringToken
     = do (PState currentPos) <- getState
-         testPos posTest currentPos
          between (updatePos $ string "\"") (updatePos $ string "\"")
              (many strElem >>= \s -> return $
              PlusPos currentPos $ LiteralString s)
 
-charToken :: (Position -> Bool) -> CharParser PState (PlusPos Literal)
-charToken posTest
+charToken :: CharParser PState (PlusPos Literal)
+charToken
     = do (PState currentPos) <- getState
-         testPos posTest currentPos
          between (updatePos $ string "\'") (updatePos $ string "\'")
              (strElem >>= \c -> return $ PlusPos currentPos $ LiteralChar c)
 
-literalToken :: (Position -> Bool) -> CharParser PState (PlusPos Literal)
-literalToken posTest
-    = do literal <- hexToken posTest <|> numberToken posTest
-             <|> stringToken posTest <|> charToken posTest
-         parseToken (const ()) (const True) (return "")
+literalToken :: LayoutInfo -> CharParser PState (PlusPos Literal)
+literalToken layout
+    = do (PState currentPos) <- getState
+         testPos layout currentPos
+         literal <- hexToken <|> numberToken <|> stringToken <|> charToken
+         parseToken id arbitraryLayout (return "")
          return literal
 
 -- Expression Parser
 
-exprParser :: Int
-    -> (Position -> Bool) -> (Position -> Bool) -> CharParser PState Expr
-exprParser (-1) headPosTest posTest
-    = ifParser headPosTest posTest <|> exprParser 0 headPosTest posTest
-exprParser 10 headPosTest posTest
-    = do result@(Expr pos _) <-
-             chainl1 (exprParser 11 posTest posTest) (return apply)
-         testPos headPosTest pos
-         return result
+exprParser :: Int -> LayoutInfo -> CharParser PState Expr
+exprParser (-1) layout
+    = ifParser layout <|> exprParser 0 layout
+exprParser 10 layout
+    = do (PState currentPos) <- getState
+         testPos layout currentPos
+         chainl1 (exprParser 11 (arbitraryElemLayout layout)) (return apply)
     where
         apply l@(Expr pos _) r = applyFunctionExpr pos $ ApplyFunction l r
-exprParser 11 headPosTest posTest
-    = bracketParser headPosTest posTest <|> listParser headPosTest posTest
-    <|> nameParser headPosTest posTest <|> literalParser headPosTest posTest
-exprParser n headPosTest posTest
-    = exprParser (n+1) headPosTest posTest
+exprParser 11 layout
+    = bracketParser layout <|> listParser layout
+    <|> nameParser layout <|> literalParser layout
+exprParser n layout
+    = exprParser (n+1) layout
 
-nameParser :: (Position -> Bool) -> (Position -> Bool) -> CharParser PState Expr
-nameParser headPosTest posTest
-    = do (PlusPos pos body) <- nameToken headPosTest
-         return $ nameExpr pos body
+nameParser :: LayoutInfo -> CharParser PState Expr
+nameParser layout
+    = nameToken layout >>= \(PlusPos pos body) -> return $ nameExpr pos body
 
-literalParser
-    :: (Position -> Bool) -> (Position -> Bool) -> CharParser PState Expr
-literalParser headPosTest posTest
-    = do (PlusPos pos literal) <- literalToken headPosTest
-         return $ literalExpr pos literal
+literalParser :: LayoutInfo -> CharParser PState Expr
+literalParser layout = literalToken layout
+    >>= \(PlusPos pos literal) -> return $ literalExpr pos literal
 
-listParser :: (Position -> Bool) -> (Position -> Bool) -> CharParser PState Expr
-listParser headPosTest posTest
-    = do (PlusPos pos _) <- parseToken (const ()) headPosTest (string "[")
-         body <- sepBy (exprParser (-10) posTest posTest)
-             (parseToken (const ()) posTest (string ","))
-         parseToken (const ()) posTest (string "]")
+listParser :: LayoutInfo -> CharParser PState Expr
+listParser layout
+    = do (PlusPos pos _) <- parseToken id layout (string "[")
+         body <- sepBy (exprParser (-10) (tailElemLayout layout))
+             (parseToken id (tailElemLayout layout) (string ","))
+         parseToken id (tailElemLayout layout) (string "]")
          return $ listExpr pos body
 
-bracketParser
-    :: (Position -> Bool) -> (Position -> Bool) -> CharParser PState Expr
-bracketParser headPosTest posTest
-    = do (PlusPos pos _) <- parseToken (const ()) headPosTest (string "(")
-         body <- exprParser (-10) posTest posTest
-         parseToken (const ()) posTest (string ")")
+bracketParser :: LayoutInfo -> CharParser PState Expr
+bracketParser layout
+    = do (PlusPos pos _) <- parseToken id layout (string "(")
+         body <- exprParser (-10) (tailElemLayout layout)
+         parseToken id (tailElemLayout layout) (string ")")
          return $ bracketExpr pos $ Bracket body
 
-ifParser :: (Position -> Bool) -> (Position -> Bool) -> CharParser PState Expr
-ifParser headPosTest posTest
-    = do parseToken (const ()) headPosTest (keyword "if")
-         c@(Expr pos _) <- exprParser (-1) posTest posTest
-         parseToken (const ()) posTest (keyword "then")
-         t <- exprParser (-1) posTest posTest
-         parseToken (const ()) posTest (keyword "else")
-         f <- exprParser (-1) posTest posTest
+ifParser :: LayoutInfo -> CharParser PState Expr
+ifParser layout
+    = do parseToken id layout (keyword "if")
+         c@(Expr pos _) <- exprParser (-1) (tailElemLayout layout)
+         parseToken id (tailElemLayout layout) (keyword "then")
+         t <- exprParser (-1) (tailElemLayout layout)
+         parseToken id (tailElemLayout layout) (keyword "else")
+         f <- exprParser (-1) (tailElemLayout layout)
          return $ ifExpr pos $ IfBlock c t f
 
 -- Pattern Match Parser
 
-{-
-patternParser :: Int -> (Position -> Bool) -> (Position -> Bool)
-    -> CharParser PState PatternMatch
-patternParser 0 headPosTest posTest
-    = 
-patternParser 10 headPosTest posTest
-    = asPatternParser headPosTest posTest
-    <|> 
+patternParser :: Int -> LayoutInfo -> CharParser PState PatternMatch
+patternParser 10 layout
+    = asPatternParser layout
 
-asPatternParser :: (Position -> Bool)
-    -> (Position -> Bool) -> CharParser PState PatternMatch
-asPatternParser headPosTest posTest
-    = do var <- vNameToken headPosTest
-         parseToken (const ()) posTest (string "@")
-         pattern <- patternParser 10 posTest posTest
-         return $ AsPattern (BindPattern var) pattern
--}
+literalPatternParser :: LayoutInfo -> CharParser PState PatternMatch
+literalPatternParser layout
+    = literalToken layout >>= \(PlusPos pos literal)
+        -> return $ literalPattern pos literal
+
+asPatternParser :: LayoutInfo -> CharParser PState PatternMatch
+asPatternParser layout
+    = do (PlusPos pos var) <- vNameToken layout
+         do parseToken id (tailElemLayout layout) (string "@")
+            pattern <- patternParser 10 (tailElemLayout layout)
+            return $ asPattern pos var pattern
+           <|> (return $ bindPattern pos var)
 
 -- Global Parser
 
 globalParser :: CharParser PState Expr
 globalParser
-    = let posTest = const True in
-      do parseToken (const ()) posTest (return "")
-         result <- exprParser (-10) posTest posTest
-         eofToken posTest
+    = do parseToken id arbitraryLayout (return "")
+         result <- exprParser (-10) arbitraryLayout
+         eofToken arbitraryLayout
          return result
 
 -- Parser Tester
