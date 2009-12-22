@@ -29,6 +29,8 @@ data PrimExpr
     = LiteralPrimExpr Literal
     | NamePrimExpr String
     | ApplyFunctionPrimExpr ApplyFunction
+    | InfixPrimExpr String Expr Expr
+    | NegativePrimExpr Expr
     | BracketPrimExpr Bracket
     | ListPrimExpr [Expr]
     | IfPrimExpr IfBlock
@@ -73,6 +75,9 @@ instance Show PrimExpr where
     show (LiteralPrimExpr literal) = show literal
     show (NamePrimExpr name) = name
     show (ApplyFunctionPrimExpr expr) = show expr
+    show (InfixPrimExpr str expr1 expr2)
+        = "{"++str++" "++show expr1++" "++show expr2++"}"
+    show (NegativePrimExpr expr) = "-"++show expr
     show (BracketPrimExpr expr) = show expr
     show (ListPrimExpr list) = show list
     show (IfPrimExpr expr) = show expr
@@ -87,6 +92,12 @@ nameExpr pos = Expr pos.NamePrimExpr
 
 applyFunctionExpr :: Position -> ApplyFunction -> Expr
 applyFunctionExpr pos = Expr pos.ApplyFunctionPrimExpr
+
+infixExpr :: Position -> String -> Expr -> Expr -> Expr
+infixExpr pos str expr = Expr pos.InfixPrimExpr str expr
+
+negativeExpr :: Position -> Expr -> Expr
+negativeExpr pos = Expr pos.NegativePrimExpr
 
 bracketExpr :: Position -> Bracket -> Expr
 bracketExpr pos = Expr pos.BracketPrimExpr
@@ -177,9 +188,15 @@ keyword str = try $
        notFollowedBy (alphaNum <|> char '_')
        return result
 
+keysymbol :: String -> CharParser st String
+keysymbol str = try $
+    do result <- string str
+       notFollowedBy (oneOf "!#$%&*+-./:<=>?@^")
+       return result
+
 -- Tokenizer
 
-parseToken :: LayoutInfo -> (CharParser () t) -> (CharParser () (PlusPos t))
+parseToken :: LayoutInfo -> (CharParser st t) -> (CharParser st (PlusPos t))
 parseToken layout strParser
     = do pos <- getPos
          testPos layout pos
@@ -188,19 +205,19 @@ parseToken layout strParser
          return (PlusPos pos token)
 
 
-lineCommentToken :: CharParser () ()
+lineCommentToken :: CharParser st ()
 lineCommentToken
     = do try $ string "--"
          manyTill anyChar (returnConst () (char '\n') <|>  eof)
          return ()
 
-blockCommentToken :: CharParser () ()
+blockCommentToken :: CharParser st ()
 blockCommentToken
     = do try $ string "{-"
          manyTill anyChar (try (string "-}"))
          return ()
 
-spacesAndComments :: CharParser () ()
+spacesAndComments :: CharParser st ()
 spacesAndComments
     = skipMany ((space >>= const (return ()))
           <|> lineCommentToken <|> blockCommentToken)
@@ -243,20 +260,27 @@ eofToken layout = parseToken layout $ returnConst () eof
 
 -- Literal Token
 
-numberToken :: CharParser () Literal
-numberToken
+decToken :: CharParser st Literal
+decToken
     = do integer <- many1 digit
          fractional <- option "" $ headPlusTail (char '.') digit
          return $ if null fractional
                       then LiteralInt $ read integer
                       else LiteralFloat $ read (integer++fractional)
 
-hexToken :: CharParser () Literal
+octToken :: CharParser st Literal
+octToken = try $
+    do char '0'
+       char 'o' <|> char 'O'
+       many1 octDigit >>= return.LiteralInt .foldl (\c -> (c*8+).digitToInt) 0
+
+hexToken :: CharParser st Literal
 hexToken = try $
-    do string "0x"
+    do char '0'
+       char 'x' <|> char 'X'
        many1 hexDigit >>= return.LiteralInt .foldl (\c -> (c*16+).digitToInt) 0
 
-strElem :: CharParser () Char
+strElem :: CharParser st Char
 strElem
     = noneOf "\\\"\'"
     <|> do char '\\'
@@ -265,20 +289,29 @@ strElem
           ; conv 'n' = '\n' ; conv 'r' = '\r' ; conv 't' = '\t'
           ; conv 'v' = '\v' ; conv c = c }
 
-stringToken :: CharParser () Literal
+stringToken :: CharParser st Literal
 stringToken
     = between (string "\"") (string "\"")
           (many strElem >>= return.LiteralString)
 
-charToken :: CharParser () Literal
+charToken :: CharParser st Literal
 charToken
     = between (string "\'") (string "\'") (strElem >>= return.LiteralChar)
 
-literalToken :: LayoutInfo -> CharParser () (PlusPos Literal)
+numLiteralToken :: LayoutInfo -> CharParser st (PlusPos Literal)
+numLiteralToken layout
+    = do pos <- getPos
+         testPos layout pos
+         literal <- hexToken <|> octToken <|> decToken
+         spacesAndComments
+         return $ PlusPos pos literal
+
+literalToken :: LayoutInfo -> CharParser st (PlusPos Literal)
 literalToken layout
     = do pos <- getPos
          testPos layout pos
-         literal <- hexToken <|> numberToken <|> stringToken <|> charToken
+         literal <- hexToken <|> octToken <|> decToken
+             <|> stringToken <|> charToken
          spacesAndComments
          return $ PlusPos pos literal
 
@@ -287,6 +320,8 @@ literalToken layout
 exprParser :: Int -> LayoutInfo -> CharParser () Expr
 exprParser (-1) layout
     = ifParser layout <|> exprParser 0 layout
+exprParser 0 layout
+    = opExprParser layout
 exprParser 10 layout
     = do pos <- getPos
          testPos layout pos
@@ -299,6 +334,17 @@ exprParser 11 layout
 exprParser n layout
     = exprParser (n+1) layout
 
+opExprParser :: LayoutInfo -> CharParser () Expr
+opExprParser layout
+    = do head@(Expr pos _) <- exprParser 10 layout
+         do (PlusPos _ op) <- opToken (tailElemLayout layout)
+            tail <- opExprParser (tailElemLayout layout)
+            return $ infixExpr pos op head tail
+           <|> return head
+    <|> do (PlusPos pos _) <- parseToken layout (keysymbol "-")
+           body <- opExprParser (tailElemLayout layout)
+           return $ negativeExpr pos body
+
 nameParser :: LayoutInfo -> CharParser () Expr
 nameParser layout
     = nameToken layout >>= \(PlusPos pos body) -> return $ nameExpr pos body
@@ -310,14 +356,14 @@ literalParser layout = literalToken layout
 bracketParser :: LayoutInfo -> CharParser () Expr
 bracketParser layout
     = do (PlusPos pos _) <- parseToken layout (string "(")
-         body <- exprParser (-10) (tailElemLayout layout)
+         body <- exprParser (-1) (tailElemLayout layout)
          parseToken (tailElemLayout layout) (string ")")
          return $ bracketExpr pos $ Bracket body
 
 listParser :: LayoutInfo -> CharParser () Expr
 listParser layout
     = do (PlusPos pos _) <- parseToken layout (string "[")
-         body <- sepBy (exprParser (-10) (tailElemLayout layout))
+         body <- sepBy (exprParser (-1) (tailElemLayout layout))
              (parseToken (tailElemLayout layout) (string ","))
          parseToken (tailElemLayout layout) (string "]")
          return $ listExpr pos body
@@ -335,14 +381,28 @@ ifParser layout
 -- Pattern Match Parser
 
 patternParser :: Int -> LayoutInfo -> CharParser () PatternMatch
+patternParser 0 layout
+    = opPatternParser layout
 patternParser 10 layout
     = patternParser 11 layout <|> dcPatternParser layout
 patternParser 11 layout
     = literalPatternParser layout <|> asPatternParser layout
     <|> bracketPatternParser layout <|> listPatternParser layout
     <|> singleDCPatternParser layout
-patternParser n layout
-    = patternParser (n+1) layout
+
+opPatternParser :: LayoutInfo -> CharParser () PatternMatch
+opPatternParser layout
+    = do head@(PatternMatch pos _) <- patternParser 10 layout
+         do (PlusPos _ cons) <- cOpToken (tailElemLayout layout)
+                <|> parseToken layout (keysymbol "+")
+            tail <- opPatternParser (tailElemLayout layout)
+            return $ dcOpPattern pos cons head tail
+           <|> return head
+    <|> do (PlusPos pos _) <- parseToken layout (keysymbol "-")
+           (PlusPos _ num) <- numLiteralToken (tailElemLayout layout)
+           return $ case num of
+               (LiteralInt n) -> literalPattern pos $ LiteralInt $ -n
+               (LiteralFloat n) -> literalPattern pos $ LiteralFloat $ -n
 
 dcPatternParser :: LayoutInfo -> CharParser () PatternMatch
 dcPatternParser layout
@@ -358,7 +418,7 @@ literalPatternParser layout
 asPatternParser :: LayoutInfo -> CharParser () PatternMatch
 asPatternParser layout
     = do (PlusPos pos var) <- vNameToken layout
-         do parseToken (tailElemLayout layout) (string "@")
+         do parseToken (tailElemLayout layout) (keysymbol "@")
             pattern <- patternParser 10 (tailElemLayout layout)
             return $ asPattern pos var pattern
            <|> (return $ bindPattern pos var)
