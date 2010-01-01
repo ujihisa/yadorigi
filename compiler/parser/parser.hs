@@ -1,4 +1,6 @@
 
+module Yadorigi.Parser where
+
 import Text.ParserCombinators.Parsec
 import Data.Char
 
@@ -482,29 +484,4 @@ globalParser =
        result <- exprParser 0 arbitraryLayout
        eofToken arbitraryLayout
        return result
-
--- Parser Tester
-
-interactiveParser :: IO ()
-interactiveParser =
-    do input <- getInput
-       case runParser globalParser () "<interactive>" input of
-           Left err -> print err
-           Right result -> print result
-    where
-        getInput =
-            do h <- getLine
-               t <- if null h then return "" else getInput
-               return (h++"\n"++t)
-
-fileParser :: FilePath -> IO ()
-fileParser filename =
-    do result <- myParseFromFile globalParser () filename
-       case result of
-           Left err -> print err
-           Right result -> print result
-    where
-        myParseFromFile p s filename =
-            do input <- readFile filename
-               return (runParser p s filename input)
 
