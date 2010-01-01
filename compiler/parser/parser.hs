@@ -2,6 +2,7 @@
 module Yadorigi.Parser where
 
 import Text.ParserCombinators.Parsec
+import Control.Monad
 import Data.Char
 
 -- Data Types
@@ -159,14 +160,10 @@ reservedSymbol = ["=","@","->"]
 -- Position
 
 getPos :: GenParser tok st Position
-getPos = do p <- getPosition
-            return $ Position (sourceLine p) (sourceColumn p)
+getPos = liftM (\p -> Position (sourceLine p) (sourceColumn p)) getPosition
 
 getPosWithTest :: (Show tok) => LayoutInfo -> GenParser tok st Position
-getPosWithTest layout =
-    do pos <- getPos
-       testPos layout pos
-       return pos
+getPosWithTest layout = getPos >>= testPos layout
 
 -- Layout
 
@@ -186,46 +183,31 @@ tailElemLayout layout = layout
 
 -- Parser Combinators
 
-headPlusTail :: GenParser tok st a -> GenParser tok st a -> GenParser tok st [a]
-headPlusTail head tail =
-    do h <- head
-       t <- many tail
-       return (h:t)
 
 returnConst :: b -> GenParser tok st a -> GenParser tok st b
 returnConst x p = p >>= const (return x)
 
-testPos :: (Show tok) => LayoutInfo -> Position -> GenParser tok st ()
+testPos :: (Show tok) => LayoutInfo -> Position -> GenParser tok st Position
 testPos layout pos
-    | checkLayout layout pos = return ()
+    | checkLayout layout pos = return pos
     | otherwise = pzero
 
 keyword :: String -> CharParser st String
-keyword str = try $
-    do result <- string str
-       notFollowedBy (alphaNum <|> char '_')
-       return result
+keyword str = try $ liftM2 const (string str) $ notFollowedBy $ alphaNum <|> char '_'
 
 keysymbol :: String -> CharParser st String
-keysymbol str = try $
-    do result <- string str
-       notFollowedBy (oneOf "!#$%&*+-./:<=>?@^")
-       return result
+keysymbol str = try $ liftM2 const (string str) $ notFollowedBy $ oneOf "!#$%&*+-./:<=>?@^"
 
 -- Tokenizer
 
 lexer :: LayoutInfo -> (CharParser st t) -> (CharParser st (PlusPos t))
-lexer layout strParser =
-    do pos <- getPosWithTest layout
-       token <- strParser
-       spacesAndComments
-       return (PlusPos pos token)
-
+lexer layout strParser = liftM3 (\ a b c -> PlusPos a b)
+    (getPosWithTest layout) strParser spacesAndComments
 
 lineCommentToken :: CharParser st ()
 lineCommentToken =
     do try $ string "--"
-       manyTill anyChar (returnConst () (char '\n') <|>  eof)
+       manyTill anyChar (returnConst () (char '\n') <|> eof)
        return ()
 
 blockCommentToken :: CharParser st ()
@@ -236,12 +218,12 @@ blockCommentToken =
 
 spacesAndComments :: CharParser st ()
 spacesAndComments =
-    skipMany ((space >>= const (return ())) <|> lineCommentToken <|> blockCommentToken)
+    skipMany $ liftM (const ()) space <|> lineCommentToken <|> blockCommentToken
 
 labelToken :: (CharParser () Char) -> (CharParser () Char) -> [String]
     -> LayoutInfo -> CharParser () (PlusPos String)
 labelToken hparser tparser reservedList layout = lexer layout $ try $
-      do str <- headPlusTail hparser tparser
+      do str <- liftM2 (:) hparser $ many tparser
          if elem str reservedList
             then unexpected $ show str
             else return str
@@ -274,50 +256,41 @@ eofToken layout = lexer layout $ returnConst () eof
 decToken :: CharParser st Literal
 decToken =
     do integer <- many1 digit
-       fractional <- option "" $ headPlusTail (char '.') digit
-       if null fractional
-           then return $ LiteralInt $ read integer
-           else return $ LiteralFloat $ read (integer++fractional)
+       fractional <- option "" $ liftM2 (:) (char '.') (many1 digit)
+       return $ if null fractional
+           then LiteralInt $ read integer
+           else LiteralFloat $ read (integer++fractional)
 
 octToken :: CharParser st Literal
 octToken = try $
     do char '0'
        char 'o' <|> char 'O'
-       many1 octDigit >>= return.LiteralInt .foldl (\c -> (c*8+).digitToInt) 0
+       liftM (LiteralInt .foldl (\c -> (c*8+).digitToInt) 0) $ many1 octDigit
 
 hexToken :: CharParser st Literal
 hexToken = try $
     do char '0'
        char 'x' <|> char 'X'
-       many1 hexDigit >>= return.LiteralInt .foldl (\c -> (c*16+).digitToInt) 0
+       liftM (LiteralInt .foldl (\c -> (c*16+).digitToInt) 0) $ many1 hexDigit
 
 strElem :: CharParser st Char
-strElem =
-    noneOf "\\\"\'"
-    <|> do char '\\'
-           oneOf "abfnrtv\\\"\'" >>= return.conv
+strElem = noneOf "\\\"\'" <|> liftM2 (\bs -> conv.(`const` bs)) (char '\\') (oneOf "abfnrtv\\\"\'")
     where { conv 'a' = '\a' ; conv 'b' = '\b' ; conv 'f' = '\f' ; conv 'n' = '\n' ;
             conv 'r' = '\r' ; conv 't' = '\t' ; conv 'v' = '\v' ; conv c = c }
 
 stringToken :: CharParser st Literal
-stringToken = between (string "\"") (string "\"") (many strElem >>= return.LiteralString)
+stringToken = between (string "\"") (string "\"") $ liftM LiteralString $ many strElem
 
 charToken :: CharParser st Literal
-charToken = between (string "\'") (string "\'") (strElem >>= return.LiteralChar)
+charToken = between (string "\'") (string "\'") $ liftM LiteralChar strElem
 
 numLiteralToken :: LayoutInfo -> CharParser st (PlusPos Literal)
-numLiteralToken layout =
-    do pos <- getPosWithTest layout
-       literal <- hexToken <|> octToken <|> decToken
-       spacesAndComments
-       return $ PlusPos pos literal
+numLiteralToken layout = liftM3 (\a b c -> PlusPos a b)
+    (getPosWithTest layout) (hexToken <|> octToken <|> decToken) spacesAndComments
 
 literalToken :: LayoutInfo -> CharParser st (PlusPos Literal)
-literalToken layout =
-    do pos <- getPosWithTest layout
-       literal <- hexToken <|> octToken <|> decToken <|> stringToken <|> charToken
-       spacesAndComments
-       return $ PlusPos pos literal
+literalToken layout = liftM3 (\a b c -> PlusPos a b) (getPosWithTest layout)
+    (hexToken <|> octToken <|> decToken <|> stringToken <|> charToken) spacesAndComments
 
 -- Expression Parser
 
@@ -326,9 +299,7 @@ exprParser 0 layout = opExprParser layout
 exprParser 1 layout =
     letParser layout <|> ifParser layout <|> caseParser layout <|> exprParser 2 layout
 exprParser 2 layout = let tlayout = tailElemLayout layout in
-    do head <- exprParser 3 layout
-       tail <- many $ exprParser 3 tlayout
-       return $ foldl apply head tail
+    liftM2 (foldl apply) (exprParser 3 layout) (many $ exprParser 3 tlayout)
     where
         apply l@(Expr pos _) r = applyFunctionExpr pos l r
 exprParser 3 layout =
@@ -341,19 +312,15 @@ opExprParser layout = let tlayout = tailElemLayout layout in
           tail <- opExprParser tlayout
           return $ infixExpr pos op head tail
           <|> return head
-    <|> do (PlusPos pos _) <- lexer layout (keysymbol "-")
-           body <- opExprParser tlayout
-           return $ negativeExpr pos body
+    <|> liftM2 (\(PlusPos pos _) -> negativeExpr pos)
+            (lexer layout (keysymbol "-")) (opExprParser tlayout)
 
 nameParser :: LayoutInfo -> CharParser () Expr
-nameParser layout =
-    do (PlusPos pos body) <- nameToken layout
-       return $ nameExpr pos body
+nameParser layout = liftM (\(PlusPos pos body) -> nameExpr pos body) (nameToken layout)
 
 literalParser :: LayoutInfo -> CharParser () Expr
 literalParser layout =
-    do (PlusPos pos literal) <- literalToken layout
-       return $ literalExpr pos literal
+    liftM (\(PlusPos pos literal) -> literalExpr pos literal) (literalToken layout)
 
 bracketParser :: LayoutInfo -> CharParser () Expr
 bracketParser layout = let tlayout = tailElemLayout layout in
