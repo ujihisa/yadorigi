@@ -55,12 +55,12 @@ keyword str = try $ liftM2 const (string str) $ notFollowedBy $ alphaNum <|> cha
 keysymbol :: String -> CharParser st String
 keysymbol str = try $ liftM2 const (string str) $ notFollowedBy $ oneOf "!#$%&*+-./:<=>?@^"
 
-layoutMany :: LayoutInfo -> (LayoutInfo -> GenParser tok st a) -> CharParser st [a]
+layoutMany :: LayoutInfo -> (LayoutInfo -> CharParser st a) -> CharParser st [a]
 layoutMany layout parser =
     do (Position _ col) <- getPosWithTest layout
        many $ parser $ LayoutInfo True col
 
-layoutMany1 :: LayoutInfo -> (LayoutInfo -> GenParser tok st a) -> CharParser st [a]
+layoutMany1 :: LayoutInfo -> (LayoutInfo -> CharParser st a) -> CharParser st [a]
 layoutMany1 layout parser =
     do (Position _ col) <- getPosWithTest layout
        many1 $ parser $ LayoutInfo True col
@@ -126,6 +126,7 @@ decToken =
        fractional <- option "" $ liftM2 (:) (char '.') (many1 digit)
        return $ if null fractional
            then LiteralInt $ read integer
+           else LiteralFloat $ read (integer++fractional)
 
 octToken :: CharParser st Literal
 octToken = try $
