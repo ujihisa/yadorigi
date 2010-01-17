@@ -1,7 +1,7 @@
 
 module Main where
 
-import Yadorigi.Parser
+import Yadorigi.Parser.Parser
 import Yadorigi.Parser.DataTypes
 import Yadorigi.Parser.Recons
 import Text.Parsec

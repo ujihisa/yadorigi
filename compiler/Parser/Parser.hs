@@ -1,9 +1,9 @@
 
-module Yadorigi.Parser where
+module Yadorigi.Parser.Parser where
 
+import Yadorigi.Common
 import Yadorigi.Parser.DataTypes
 import Text.Parsec
-import Control.Applicative (pure,(<*>),(<**>))
 import Control.Monad
 import Data.Char
 import Data.Maybe
@@ -89,24 +89,22 @@ labelToken hparser tparser reservedList layout = lexer layout $ try $
             else return str
 
 nameToken :: LayoutInfo -> Parsec String u (PlusPos String)
-nameToken layout = labelToken (letter <|> char '_') (alphaNum <|> oneOf "_\'") reservedWord layout
+nameToken = labelToken (letter <|> char '_') (alphaNum <|> oneOf "_\'") reservedWord
 
 opToken :: LayoutInfo -> Parsec String u (PlusPos String)
-opToken layout =
-    labelToken (oneOf "!#$%&*+-./:<=>?@^|") (oneOf "!#$%&*+-./:<=>?@^|") reservedSymbol layout
+opToken = labelToken (oneOf "!#$%&*+-./:<=>?@^|") (oneOf "!#$%&*+-./:<=>?@^|") reservedSymbol
 
 vNameToken :: LayoutInfo -> Parsec String u (PlusPos String)
-vNameToken layout = labelToken (lower <|> char '_') (alphaNum <|> oneOf "_\'") reservedWord layout
+vNameToken = labelToken (lower <|> char '_') (alphaNum <|> oneOf "_\'") reservedWord
 
 vOpToken :: LayoutInfo -> Parsec String u (PlusPos String)
-vOpToken layout =
-    labelToken (oneOf "!#$%&*+-./<=>?@^|") (oneOf "!#$%&*+-./:<=>?@^|") reservedSymbol layout
+vOpToken = labelToken (oneOf "!#$%&*+-./<=>?@^|") (oneOf "!#$%&*+-./:<=>?@^|") reservedSymbol
 
 cNameToken :: LayoutInfo -> Parsec String u (PlusPos String)
-cNameToken layout = labelToken upper (alphaNum <|> oneOf "_\'") reservedWord layout
+cNameToken = labelToken upper (alphaNum <|> oneOf "_\'") reservedWord
 
 cOpToken :: LayoutInfo -> Parsec String u (PlusPos String)
-cOpToken layout = labelToken (char ':') (oneOf "!#$%&*+-./:<=>?@^|") reservedSymbol layout
+cOpToken = labelToken (char ':') (oneOf "!#$%&*+-./:<=>?@^|") reservedSymbol
 
 eofToken :: LayoutInfo -> Parsec String u (PlusPos ())
 eofToken layout = lexer layout $ eof>>return ()
@@ -166,21 +164,19 @@ namespaceParser layout = let tlayout = tailElemLayout layout in
 -- Expression Parser
 
 exprParser :: Int -> LayoutInfo -> Parsec String u Expr
-exprParser 0 layout = let tlayout = tailElemLayout layout in
+exprParser 0 = exprWithDataTypeParser
+exprParser 1 = opExprParser
+exprParser 2 = choice.flip amap [lambdaExprParser,exprParser 3]
+exprParser 3 = choice.flip amap [letParser,ifParser,caseParser,exprParser 4]
+exprParser 4 = applyParser
+exprParser 5 = choice.flip amap [nameParser,literalParser,bracketParser,listParser]
+
+exprWithDataTypeParser layout = let tlayout = tailElemLayout layout in
     do expr@(Expr pos _) <- exprParser 1 layout
        do lexer tlayout (keysymbol "::")
           typeName <- typeNameParaser tlayout
           return $ exprWithDataType pos expr typeName
           <|> return expr
-exprParser 1 layout = opExprParser layout
-exprParser 2 layout = lambdaExprParser layout <|> exprParser 3 layout
-exprParser 3 layout =
-    letParser layout <|> ifParser layout <|> caseParser layout <|> exprParser 4 layout
-exprParser 4 layout = let tlayout = tailElemLayout layout in
-    liftM2 (foldl apply) (exprParser 5 layout) $ many $ exprParser 5 tlayout
-    where apply l@(Expr pos _) r = applyFunctionExpr pos l r
-exprParser 5 layout =
-    nameParser layout <|> literalParser layout <|> bracketParser layout <|> listParser layout
 
 lambdaExprParser :: LayoutInfo -> Parsec String u Expr
 lambdaExprParser layout = let tlayout = tailElemLayout layout in
@@ -273,6 +269,10 @@ caseParser layout = let tlayout = tailElemLayout layout in
                expr <- exprParser 0 tlayout
                return $ Guard cond expr
 
+applyParser layout = let tlayout = tailElemLayout layout in
+    liftM2 (foldl apply) (exprParser 5 layout) $ many $ exprParser 5 tlayout
+    where apply l@(Expr pos _) r = applyFunctionExpr pos l r
+
 -- Pattern Match Parser
 
 aPatternParser :: LayoutInfo -> Parsec String u PatternMatch
@@ -283,11 +283,10 @@ manyPatternParser layout = let tlayout = tailElemLayout layout in
     do liftM2 (:) (patternParser 11 layout) (many $ patternParser 11 tlayout)
 
 patternParser :: Int -> LayoutInfo -> Parsec String u PatternMatch
-patternParser 0 layout = opPatternParser layout
-patternParser 10 layout = dcPatternParser layout <|> patternParser 11 layout
-patternParser 11 layout =
-    literalPatternParser layout <|> asPatternParser layout <|> bracketPatternParser layout <|>
-        listPatternParser layout <|> singleDCPatternParser layout
+patternParser 0 = opPatternParser
+patternParser 10 = choice.flip amap [dcPatternParser,patternParser 11]
+patternParser 11 = choice.flip amap [literalPatternParser,asPatternParser,
+    bracketPatternParser,listPatternParser,singleDCPatternParser]
 
 opPatternParser :: LayoutInfo -> Parsec String u PatternMatch
 opPatternParser layout = let tlayout = tailElemLayout layout in
@@ -359,18 +358,23 @@ typeClassInfoParser layout = let tlayout = tailElemLayout layout in
        return body
 
 primTypeParser :: Int -> LayoutInfo -> Parsec String u PrimDataType
-primTypeParser 0 layout = let tlayout = tailElemLayout layout in
+primTypeParser 0 = functionTypeParser
+primTypeParser 1 = choice.flip amap [composedTypeParser,primTypeParser 2]
+primTypeParser 2 = choice.flip amap [composedTypeParser1,listTypeParser,bracketTypeParser]
+
+functionTypeParser :: LayoutInfo -> Parsec String u PrimDataType
+functionTypeParser layout = let tlayout = tailElemLayout layout in
     chainr1 (primTypeParser 1 layout) $ liftM (const FunctionType) (lexer tlayout (keysymbol "->"))
-primTypeParser 1 layout = composedTypeParser layout <|> primTypeParser 2 layout
-primTypeParser 2 layout = let tlayout = tailElemLayout layout in
-    liftM3 ComposedDataType (liftM minusPos $ cNameToken layout)
-        (namespaceParser tlayout) (return []) <|>
-    listTypeParser layout <|> bracketTypeParser layout
 
 composedTypeParser :: LayoutInfo -> Parsec String u PrimDataType
 composedTypeParser layout = let tlayout = tailElemLayout layout in
     liftM3 ComposedDataType (liftM minusPos $ cNameToken layout)
         (namespaceParser tlayout) (many $ primTypeParser 2 tlayout)
+
+composedTypeParser1 :: LayoutInfo -> Parsec String u PrimDataType
+composedTypeParser1 layout = let tlayout = tailElemLayout layout in
+    liftM3 ComposedDataType (liftM minusPos $ cNameToken layout)
+        (namespaceParser tlayout) (return [])
 
 listTypeParser :: LayoutInfo -> Parsec String u PrimDataType
 listTypeParser layout = let tlayout = tailElemLayout layout in
