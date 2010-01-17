@@ -22,18 +22,30 @@ data PrimPatternMatch
     | LiteralPrimPattern Literal {- literal pattern -}
     | DCOpPrimPattern String [String] PatternMatch PatternMatch {- infix data constructor pattern -}
     | ListPrimPattern [PatternMatch] {- list pattern -}
-    | BindPrimPattern String (Maybe PatternMatch)
-        {- bind pattern (including wild card pattern and as pattern) -}
+    | BindPrimPattern String (Maybe PatternMatch) {- bind pattern (including wild card pattern and as pattern) -}
     | BracketPrimPattern PatternMatch {- Bracket Pattern -}
 
 
-data LambdaExpr = LambdaExpr Position [PatternMatch] Expr
+data DataType
+    = DataType Position [TypeClassInfo] PrimDataType
+
+data TypeClassInfo
+    = TypeClassInfo String PrimDataType
+
+data PrimDataType
+    = VariableType String
+    | ComposedDataType String [String] [PrimDataType]
+    | ListType PrimDataType
+    | FunctionType PrimDataType PrimDataType
+
+
+data Guard = Guard Expr Expr
+
+data Lambda = Lambda Position [PatternMatch] Expr
 
 data LetOne = LetOne PatternMatch Expr
 
-data CaseGuard = CaseGuard Expr Expr
-
-data CasePattern = CasePattern PatternMatch (Either Expr [CaseGuard])
+data CasePattern = CasePattern PatternMatch (Either Expr [Guard])
 
 data Expr = Expr Position PrimExpr
 
@@ -45,24 +57,16 @@ data PrimExpr
     | NegativePrimExpr Expr {- negative expression -}
     | BracketPrimExpr Expr {- bracket expression -}
     | ListPrimExpr [Expr] {- list expression -}
-    | LambdaPrimExpr [LambdaExpr] {- lambda expression -}
+    | LambdaPrimExpr [Lambda] {- lambda expression -}
     | LetPrimExpr [LetOne] Expr {- let expression -}
     | IfPrimExpr Expr Expr Expr {- if expression -}
     | CasePrimExpr Expr [CasePattern] {- case Expression -}
     | PrimExprWithDataType Expr DataType {- expression with data type information -}
 
 
-data DataType
-    = DataType Position [TypeClassInfo] PrimDataType
-
-data TypeClassInfo
-    = TypeClassInfo String [String]
-
-data PrimDataType
-    = VariableType String
-    | ComposedDataType String [String] [PrimDataType]
-    | ListType PrimDataType
-    | FunctionType PrimDataType PrimDataType
+data Statement
+    = TypeSignatureStatement String DataType
+    | BindStatement String [PatternMatch] Expr
 
 -- Output Format
 
@@ -88,17 +92,17 @@ instance Show PrimPatternMatch where
         "("++show expr1++" "++str++"#"++(concat $ intersperse "." modname)++" "++show expr2++")"
     show (ListPrimPattern list) = show list
     show (BindPrimPattern str Nothing) = str
-    show (BindPrimPattern str (Just pattern)) = str++"@"++show pattern
+    show (BindPrimPattern str (Just pattern)) = "("++str++"@"++show pattern++")"
     show (BracketPrimPattern pattern) = "("++show pattern++")"
 
-instance Show LambdaExpr where
-    show (LambdaExpr pos params expr) = (concat $ intersperse " " $ map show params)++" -> "++show expr
+instance Show Lambda where
+    show (Lambda pos params expr) = (concat $ intersperse " " $ map show params)++" -> "++show expr
 
 instance Show LetOne where
     show (LetOne pattern expr) = show pattern++" = "++show expr
 
-instance Show CaseGuard where
-    show (CaseGuard cond expr) = "| "++show cond++" "++show expr
+instance Show Guard where
+    show (Guard cond expr) = "| "++show cond++" "++show expr
 
 instance Show CasePattern where
     show (CasePattern pattern (Left expr)) = show pattern++" "++show expr
@@ -132,7 +136,7 @@ instance Show DataType where
         "("++(concat $ intersperse "," $ map show typeClassInfo)++") => "++show dataType
 
 instance Show TypeClassInfo where
-    show (TypeClassInfo typeClass typeNames) = typeClass++concat (intersperse " " typeNames)
+    show (TypeClassInfo typeClass typeName) = typeClass++" "++show typeName
 
 instance Show PrimDataType where
     show (VariableType str) = str
@@ -167,7 +171,7 @@ bracketExpr pos = Expr pos.BracketPrimExpr
 listExpr :: Position -> [Expr] -> Expr
 listExpr pos = Expr pos.ListPrimExpr
 
-lambdaExpr :: Position -> [LambdaExpr] -> Expr
+lambdaExpr :: Position -> [Lambda] -> Expr
 lambdaExpr pos = Expr pos.LambdaPrimExpr
 
 letExpr :: Position -> [LetOne] -> Expr -> Expr

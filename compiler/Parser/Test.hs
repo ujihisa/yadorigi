@@ -4,7 +4,7 @@ module Main where
 import Yadorigi.Parser
 import Yadorigi.Parser.DataTypes
 import Yadorigi.Parser.Recons
-import Text.ParserCombinators.Parsec
+import Text.Parsec
 
 -- Parser Tester
 
