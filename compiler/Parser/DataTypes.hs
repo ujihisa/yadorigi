@@ -22,8 +22,10 @@ data PrimPatternMatch
     | LiteralPrimPattern Literal {- literal pattern -}
     | DCOpPrimPattern String [String] PatternMatch PatternMatch {- infix data constructor pattern -}
     | ListPrimPattern [PatternMatch] {- list pattern -}
-    | BindPrimPattern String (Maybe PatternMatch) {- bind pattern (including wild card pattern and as pattern) -}
+    | BindPrimPattern String (Maybe PatternMatch)
+        {- bind pattern (including wild card pattern and as pattern) -}
     | BracketPrimPattern PatternMatch {- Bracket Pattern -}
+    | PrimPatternWithType PatternMatch DataType  {- pattern with data type information -}
 
 
 data DataType
@@ -61,7 +63,7 @@ data PrimExpr
     | LetPrimExpr [LetOne] Expr {- let expression -}
     | IfPrimExpr Expr Expr Expr {- if expression -}
     | CasePrimExpr Expr [CasePattern] {- case Expression -}
-    | PrimExprWithDataType Expr DataType {- expression with data type information -}
+    | PrimExprWithType Expr DataType {- expression with data type information -}
 
 
 data Statement
@@ -94,6 +96,7 @@ instance Show PrimPatternMatch where
     show (BindPrimPattern str Nothing) = str
     show (BindPrimPattern str (Just pattern)) = "("++str++"@"++show pattern++")"
     show (BracketPrimPattern pattern) = "("++show pattern++")"
+    show (PrimPatternWithType pattern typeName) = "("++show pattern++show typeName++")"
 
 instance Show Lambda where
     show (Lambda pos params expr) = (concat $ intersperse " " $ map show params)++" -> "++show expr
@@ -127,7 +130,7 @@ instance Show PrimExpr where
     show (LetPrimExpr list expr) = "{let "++show list++" "++show expr++"}"
     show (IfPrimExpr c t f) = "{if "++show c++" "++show t++" "++show f++"}"
     show (CasePrimExpr expr list) = "{case "++show expr++" "++show list++"}"
-    show (PrimExprWithDataType expr dataType) = "("++show expr++"::"++show dataType++")"
+    show (PrimExprWithType expr dataType) = "("++show expr++"::"++show dataType++")"
 
 instance Show DataType where
     show (DataType _ [] dataType) = show dataType
@@ -149,6 +152,31 @@ instance Show PrimDataType where
     show (FunctionType t1 t2) = "("++show t1++" -> "++show t2++")"
 
 -- Composed Data Constructors
+
+dcPattern :: Position -> String -> [String] -> [PatternMatch] -> PatternMatch
+dcPattern pos str modname = PatternMatch pos.DCPrimPattern str modname
+
+literalPattern :: Position -> Literal -> PatternMatch
+literalPattern pos = PatternMatch pos.LiteralPrimPattern
+
+dcOpPattern :: Position -> String -> [String] -> PatternMatch -> PatternMatch -> PatternMatch
+dcOpPattern pos str modname pat = PatternMatch pos.DCOpPrimPattern str modname pat
+
+listPattern :: Position -> [PatternMatch] -> PatternMatch
+listPattern pos = PatternMatch pos.ListPrimPattern
+
+bindPattern :: Position -> String -> PatternMatch
+bindPattern pos str = PatternMatch pos $ BindPrimPattern str Nothing
+
+asPattern :: Position -> String -> PatternMatch -> PatternMatch
+asPattern pos str = PatternMatch pos.BindPrimPattern str.Just
+
+bracketPattern :: Position -> PatternMatch -> PatternMatch
+bracketPattern pos = PatternMatch pos.BracketPrimPattern
+
+patternWithType :: Position -> PatternMatch -> DataType -> PatternMatch
+patternWithType pos pat = PatternMatch pos.PrimPatternWithType pat
+
 
 literalExpr :: Position -> Literal -> Expr
 literalExpr pos = Expr pos.LiteralPrimExpr
@@ -183,28 +211,7 @@ ifExpr pos c t = Expr pos.IfPrimExpr c t
 caseExpr :: Position -> Expr -> [CasePattern] -> Expr
 caseExpr pos expr = Expr pos.CasePrimExpr expr
 
-exprWithDataType :: Position -> Expr -> DataType -> Expr
-exprWithDataType pos expr = Expr pos.PrimExprWithDataType expr
+exprWithType :: Position -> Expr -> DataType -> Expr
+exprWithType pos expr = Expr pos.PrimExprWithType expr
 
-
-dcPattern :: Position -> String -> [String] -> [PatternMatch] -> PatternMatch
-dcPattern pos str modname = PatternMatch pos.DCPrimPattern str modname
-
-literalPattern :: Position -> Literal -> PatternMatch
-literalPattern pos = PatternMatch pos.LiteralPrimPattern
-
-dcOpPattern :: Position -> String -> [String] -> PatternMatch -> PatternMatch -> PatternMatch
-dcOpPattern pos str modname pat = PatternMatch pos.DCOpPrimPattern str modname pat
-
-listPattern :: Position -> [PatternMatch] -> PatternMatch
-listPattern pos = PatternMatch pos.ListPrimPattern
-
-bindPattern :: Position -> String -> PatternMatch
-bindPattern pos str = PatternMatch pos $ BindPrimPattern str Nothing
-
-asPattern :: Position -> String -> PatternMatch -> PatternMatch
-asPattern pos str = PatternMatch pos.BindPrimPattern str.Just
-
-bracketPattern :: Position -> PatternMatch -> PatternMatch
-bracketPattern pos = PatternMatch pos.BracketPrimPattern
 

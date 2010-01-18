@@ -164,18 +164,18 @@ namespaceParser layout = let tlayout = tailElemLayout layout in
 -- Expression Parser
 
 exprParser :: Int -> LayoutInfo -> Parsec String u Expr
-exprParser 0 = exprWithDataTypeParser
+exprParser 0 = exprWithTypeParser
 exprParser 1 = opExprParser
 exprParser 2 = choice.flip amap [lambdaExprParser,exprParser 3]
 exprParser 3 = choice.flip amap [letParser,ifParser,caseParser,exprParser 4]
 exprParser 4 = applyParser
 exprParser 5 = choice.flip amap [nameParser,literalParser,bracketParser,listParser]
 
-exprWithDataTypeParser layout = let tlayout = tailElemLayout layout in
+exprWithTypeParser layout = let tlayout = tailElemLayout layout in
     do expr@(Expr pos _) <- exprParser 1 layout
        do lexer tlayout (keysymbol "::")
           typeName <- typeNameParaser tlayout
-          return $ exprWithDataType pos expr typeName
+          return $ exprWithType pos expr typeName
           <|> return expr
 
 lambdaExprParser :: LayoutInfo -> Parsec String u Expr
@@ -280,17 +280,26 @@ aPatternParser = patternParser 0
 
 manyPatternParser :: LayoutInfo -> Parsec String u [PatternMatch]
 manyPatternParser layout = let tlayout = tailElemLayout layout in
-    do liftM2 (:) (patternParser 11 layout) (many $ patternParser 11 tlayout)
+    do liftM2 (:) (patternParser 3 layout) (many $ patternParser 3 tlayout)
 
 patternParser :: Int -> LayoutInfo -> Parsec String u PatternMatch
-patternParser 0 = opPatternParser
-patternParser 10 = choice.flip amap [dcPatternParser,patternParser 11]
-patternParser 11 = choice.flip amap [literalPatternParser,asPatternParser,
+patternParser 0 = patternWithTypeParser
+patternParser 1 = opPatternParser
+patternParser 2 = choice.flip amap [dcPatternParser,patternParser 3]
+patternParser 3 = choice.flip amap [literalPatternParser,asPatternParser,
     bracketPatternParser,listPatternParser,singleDCPatternParser]
+
+patternWithTypeParser :: LayoutInfo -> Parsec String u PatternMatch
+patternWithTypeParser layout = let tlayout = tailElemLayout layout in
+    do head@(PatternMatch pos _) <- patternParser 1 layout
+       do lexer tlayout (keysymbol "::")
+          typeName <- typeNameParaser tlayout
+          return $ patternWithType pos head typeName
+          <|> return head
 
 opPatternParser :: LayoutInfo -> Parsec String u PatternMatch
 opPatternParser layout = let tlayout = tailElemLayout layout in
-    do head@(PatternMatch pos _) <- patternParser 10 layout
+    do head@(PatternMatch pos _) <- patternParser 2 layout
        do (PlusPos _ cons) <- cOpToken tlayout <|> lexer tlayout (keysymbol "+")
           namespace <- namespaceParser tlayout
           tail <- opPatternParser tlayout
@@ -306,7 +315,7 @@ dcPatternParser :: LayoutInfo -> Parsec String u PatternMatch
 dcPatternParser layout = let tlayout = tailElemLayout layout in
     do (PlusPos pos cons) <- cNameToken layout
        namespace <- namespaceParser tlayout
-       body <- many (patternParser 11 (tailElemLayout tlayout))
+       body <- many (patternParser 3 (tailElemLayout tlayout))
        return $ dcPattern pos cons namespace body
 
 literalPatternParser :: LayoutInfo -> Parsec String u PatternMatch
@@ -317,7 +326,7 @@ asPatternParser :: LayoutInfo -> Parsec String u PatternMatch
 asPatternParser layout = let tlayout = tailElemLayout layout in
     do (PlusPos pos var) <- vNameToken layout
        do lexer tlayout (keysymbol "@")
-          pattern <- patternParser 10 tlayout
+          pattern <- patternParser 2 tlayout
           return $ asPattern pos var pattern
           <|> (return $ bindPattern pos var)
 
