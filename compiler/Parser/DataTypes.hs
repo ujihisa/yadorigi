@@ -1,26 +1,43 @@
 
 module Yadorigi.Parser.DataTypes where
 
+import Text.Parsec
+
 import Data.List
 
 -- Data Types
 
-data Position = Position Int Int
-
-data PlusPos body = PlusPos Position body
+data Position = Position Int Int deriving Show
 
 data LayoutInfo = LayoutInfo Bool Int
 
+data Literal
+    = LiteralInt Int
+    | LiteralFloat Float
+    | LiteralChar Char
+    | LiteralString String deriving Eq
 
-data Literal = LiteralInt Int | LiteralFloat Float | LiteralChar Char | LiteralString String
+data ScopedName = ScopedName [String] String deriving Eq
+
+
+data Token' = Token' SourcePos Token
+
+type TokenStream = [Token']
+
+data Token
+    = EmptyToken
+    | LiteralToken Literal
+    | NameToken ScopedName
+    | OpToken ScopedName
+    | ReservedToken String deriving (Eq,Show)
 
 
 data PatternMatch = PatternMatch Position PrimPatternMatch
 
 data PrimPatternMatch
-    = DCPrimPattern String [String] [PatternMatch] {- data constructor pattern -}
+    = DCPrimPattern ScopedName [PatternMatch] {- data constructor pattern -}
     | LiteralPrimPattern Literal {- literal pattern -}
-    | DCOpPrimPattern String [String] PatternMatch PatternMatch {- infix data constructor pattern -}
+    | DCOpPrimPattern ScopedName PatternMatch PatternMatch {- infix data constructor pattern -}
     | ListPrimPattern [PatternMatch] {- list pattern -}
     | BindPrimPattern String (Maybe PatternMatch)
         {- bind pattern (including wild card pattern and as pattern) -}
@@ -28,42 +45,44 @@ data PrimPatternMatch
     | PrimPatternWithType PatternMatch DataType  {- pattern with data type information -}
 
 
-data DataType
-    = DataType Position [TypeClassInfo] PrimDataType
-
-data TypeClassInfo
-    = TypeClassInfo String PrimDataType
-
-data PrimDataType
-    = VariableType String
-    | ComposedDataType String [String] [PrimDataType]
-    | ListType PrimDataType
-    | FunctionType PrimDataType PrimDataType
-
-
 data Guard = Guard Expr Expr
+
+type ExprOrGuard = Either Expr [Guard]
 
 data Lambda = Lambda Position [PatternMatch] Expr
 
-data LetOne = LetOne PatternMatch Expr
+data PrimLet = PrimLet PatternMatch ExprOrGuard
 
-data CasePattern = CasePattern PatternMatch (Either Expr [Guard])
+data CasePattern = CasePattern PatternMatch ExprOrGuard
 
 data Expr = Expr Position PrimExpr
 
 data PrimExpr
     = LiteralPrimExpr Literal {- literal expression -}
-    | NamePrimExpr String [String] {- name expression -}
+    | NamePrimExpr ScopedName {- name expression -}
     | ApplyFunctionPrimExpr Expr Expr {- apply function expression -}
-    | InfixPrimExpr String [String] Expr Expr {- infix expression -}
+    | InfixPrimExpr ScopedName Expr Expr {- infix expression -}
     | NegativePrimExpr Expr {- negative expression -}
     | BracketPrimExpr Expr {- bracket expression -}
     | ListPrimExpr [Expr] {- list expression -}
     | LambdaPrimExpr [Lambda] {- lambda expression -}
-    | LetPrimExpr [LetOne] Expr {- let expression -}
+    | LetPrimExpr [PrimLet] Expr {- let expression -}
     | IfPrimExpr Expr Expr Expr {- if expression -}
     | CasePrimExpr Expr [CasePattern] {- case Expression -}
     | PrimExprWithType Expr DataType {- expression with data type information -}
+
+
+data DataType
+    = DataType Position [TypeClassInfo] PrimDataType
+
+data TypeClassInfo
+    = TypeClassInfo ScopedName PrimDataType
+
+data PrimDataType
+    = VariableType String
+    | ComposedDataType ScopedName [PrimDataType]
+    | ListType PrimDataType
+    | FunctionType PrimDataType PrimDataType
 
 
 data Statement
@@ -72,26 +91,25 @@ data Statement
 
 -- Output Format
 
-instance (Show body) => Show (PlusPos body) where
-    show (PlusPos (Position line column) body) = show line++","++show column++" "++show body
-
 instance Show Literal where
     show (LiteralInt i) = show i
     show (LiteralFloat f) = show f
     show (LiteralChar c) = show c
     show (LiteralString s) = show s
 
+instance Show ScopedName where
+    show (ScopedName scope name) = concatMap (++".") scope++name
+
+instance Show Token' where
+    show (Token' pos t) = show pos++" "++show t
+
 instance Show PatternMatch where
     show (PatternMatch pos pattern) = show pattern
 
 instance Show PrimPatternMatch where
-    show (DCPrimPattern str [] list) = "("++str++concatMap ((' ':).show) list++")"
-    show (DCPrimPattern str modname list) =
-        "("++str++"#"++(concat $ intersperse "." modname)++concatMap ((' ':).show) list++")"
+    show (DCPrimPattern name list) = "("++show name++concatMap ((' ':).show) list++")"
     show (LiteralPrimPattern literal) = show literal
-    show (DCOpPrimPattern str [] expr1 expr2) = "("++show expr1++" "++str++" "++show expr2++")"
-    show (DCOpPrimPattern str modname expr1 expr2) =
-        "("++show expr1++" "++str++"#"++(concat $ intersperse "." modname)++" "++show expr2++")"
+    show (DCOpPrimPattern name expr1 expr2) = "("++show expr1++" "++show name++" "++show expr2++")"
     show (ListPrimPattern list) = show list
     show (BindPrimPattern str Nothing) = str
     show (BindPrimPattern str (Just pattern)) = "("++str++"@"++show pattern++")"
@@ -101,8 +119,8 @@ instance Show PrimPatternMatch where
 instance Show Lambda where
     show (Lambda pos params expr) = (concat $ intersperse " " $ map show params)++" -> "++show expr
 
-instance Show LetOne where
-    show (LetOne pattern expr) = show pattern++" = "++show expr
+instance Show PrimLet where
+    show (PrimLet pattern expr) = show pattern++" = "++show expr
 
 instance Show Guard where
     show (Guard cond expr) = "| "++show cond++" "++show expr
@@ -116,13 +134,9 @@ instance Show Expr where
 
 instance Show PrimExpr where
     show (LiteralPrimExpr literal) = show literal
-    show (NamePrimExpr name []) = name
-    show (NamePrimExpr name modname) = name++"#"++(concat $ intersperse "." modname)
-    show (ApplyFunctionPrimExpr func param) = show func++" "++show param
-    show (InfixPrimExpr str [] expr1 expr2) =
-        "("++show expr1++" "++str++" "++show expr2++")"
-    show (InfixPrimExpr str modname expr1 expr2) =
-        "("++show expr1++" "++str++"#"++(concat $ intersperse "." modname)++" "++show expr2++")"
+    show (NamePrimExpr name) = show name
+    show (ApplyFunctionPrimExpr func param) = "("++show func++" "++show param++")"
+    show (InfixPrimExpr name expr1 expr2) = "("++show expr1++" "++show name++" "++show expr2++")"
     show (NegativePrimExpr expr) = "-"++show expr
     show (BracketPrimExpr expr) = "("++show expr++")"
     show (ListPrimExpr list) = show list
@@ -139,28 +153,25 @@ instance Show DataType where
         "("++(concat $ intersperse "," $ map show typeClassInfo)++") => "++show dataType
 
 instance Show TypeClassInfo where
-    show (TypeClassInfo typeClass typeName) = typeClass++" "++show typeName
+    show (TypeClassInfo typeClass typeName) = show typeClass++" "++show typeName
 
 instance Show PrimDataType where
     show (VariableType str) = str
-    show (ComposedDataType str [] []) = str
-    show (ComposedDataType str modname []) = str++"#"++(concat $ intersperse "." modname)
-    show (ComposedDataType str [] params) = "("++str++concatMap ((' ':).show) params++")"
-    show (ComposedDataType str modname params) =
-        "("++str++"#"++(concat $ intersperse "." modname)++concatMap ((' ':).show) params++")"
+    show (ComposedDataType name []) = show name
+    show (ComposedDataType name params) = "("++show name++concatMap ((' ':).show) params++")"
     show (ListType param) = "["++show param++"]"
     show (FunctionType t1 t2) = "("++show t1++" -> "++show t2++")"
 
 -- Composed Data Constructors
 
-dcPattern :: Position -> String -> [String] -> [PatternMatch] -> PatternMatch
-dcPattern pos str modname = PatternMatch pos.DCPrimPattern str modname
+dcPattern :: Position -> ScopedName -> [PatternMatch] -> PatternMatch
+dcPattern pos name = PatternMatch pos.DCPrimPattern name
 
 literalPattern :: Position -> Literal -> PatternMatch
 literalPattern pos = PatternMatch pos.LiteralPrimPattern
 
-dcOpPattern :: Position -> String -> [String] -> PatternMatch -> PatternMatch -> PatternMatch
-dcOpPattern pos str modname pat = PatternMatch pos.DCOpPrimPattern str modname pat
+dcOpPattern :: Position -> ScopedName -> PatternMatch -> PatternMatch -> PatternMatch
+dcOpPattern pos name pat = PatternMatch pos.DCOpPrimPattern name pat
 
 listPattern :: Position -> [PatternMatch] -> PatternMatch
 listPattern pos = PatternMatch pos.ListPrimPattern
@@ -181,14 +192,14 @@ patternWithType pos pat = PatternMatch pos.PrimPatternWithType pat
 literalExpr :: Position -> Literal -> Expr
 literalExpr pos = Expr pos.LiteralPrimExpr
 
-nameExpr :: Position -> String -> [String] -> Expr
-nameExpr pos str = Expr pos.NamePrimExpr str
+nameExpr :: Position -> ScopedName -> Expr
+nameExpr pos = Expr pos.NamePrimExpr
 
 applyFunctionExpr :: Position -> Expr -> Expr -> Expr
 applyFunctionExpr pos func = Expr pos.ApplyFunctionPrimExpr func
 
-infixExpr :: Position -> String -> [String] -> Expr -> Expr -> Expr
-infixExpr pos str modname expr = Expr pos.InfixPrimExpr str modname expr
+infixExpr :: Position -> ScopedName -> Expr -> Expr -> Expr
+infixExpr pos name expr = Expr pos.InfixPrimExpr name expr
 
 negativeExpr :: Position -> Expr -> Expr
 negativeExpr pos = Expr pos.NegativePrimExpr
@@ -202,7 +213,7 @@ listExpr pos = Expr pos.ListPrimExpr
 lambdaExpr :: Position -> [Lambda] -> Expr
 lambdaExpr pos = Expr pos.LambdaPrimExpr
 
-letExpr :: Position -> [LetOne] -> Expr -> Expr
+letExpr :: Position -> [PrimLet] -> Expr -> Expr
 letExpr pos list = Expr pos.LetPrimExpr list
 
 ifExpr :: Position -> Expr -> Expr -> Expr -> Expr

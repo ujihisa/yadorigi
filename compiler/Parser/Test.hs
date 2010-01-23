@@ -1,21 +1,27 @@
 
+{-# LANGUAGE BangPatterns#-}
+
 module Main where
 
-import Yadorigi.Parser.Parser
 import Yadorigi.Parser.DataTypes
+import Yadorigi.Parser.Parser
+import Yadorigi.Parser.Tokenizer
 import Yadorigi.Parser.Recons
+
 import Text.Parsec
+
+import Control.Monad
 
 -- Parser Tester
 
-strParser :: String -> Either ParseError Expr
-strParser str = runParser globalParser () "<contents>" str
-
-printEither :: (Show a,Show b) => Either a b -> IO ()
-printEither (Right a) = print a
-printEither (Left b) = print b
-
 main :: IO ()
 main = do contents <- getContents
-          printEither $ strParser contents
-
+          tokenizerResult <- return $ runParser tokenizer () "<interactive>" contents
+          case tokenizerResult of
+              (Right ts) ->
+                  do sequence_ (map print ts)
+                     parserResult <- return $ runParser globalParser () "<tokenStream>" ts
+                     case parserResult of
+                         (Right result) -> print result
+                         (Left error) -> print error
+              (Left error) -> print error
