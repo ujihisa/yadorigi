@@ -24,12 +24,6 @@ reservedSymbol = ["=","@","\\","->","=>","::","|",",","(",")","[","]"]
 
 -- Tokenizer
 
-getEmptyToken :: Parsec String u Token'
-getEmptyToken =
-    do pos <- getPosition
-       spacesAndComments
-       return $ Token' pos EmptyToken
-
 getToken :: Parsec String u Token'
 getToken =
     do pos <- getPosition
@@ -38,7 +32,7 @@ getToken =
        return $ Token' pos body
 
 tokenizer :: Parsec String u TokenStream
-tokenizer = liftM3 ((const.).(:)) getEmptyToken (many getToken) eof
+tokenizer = between spacesAndComments eof (many getToken)
 
 -- Spaces and Comments
 

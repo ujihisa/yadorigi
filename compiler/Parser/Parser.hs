@@ -6,7 +6,7 @@ import Yadorigi.Parser.DataTypes
 
 import Text.Parsec
 
-import Control.Applicative ((<$>))
+import Control.Applicative ((<$>),(<*),(*>),(<*>),(<**>))
 import Control.Monad
 
 import Data.Char
@@ -48,9 +48,6 @@ getToken :: (Token -> Maybe a) -> LayoutInfo -> Parsec TokenStream u a
 getToken f layout =
     do getPosWithTest layout
        token show (\(Token' pos _) -> pos) (\(Token' _ token) -> f token)
-
-emptyToken :: LayoutInfo -> Parsec TokenStream u ()
-emptyToken = getToken (guard.(== EmptyToken))
 
 literalToken :: LayoutInfo -> Parsec TokenStream u Literal
 literalToken = getToken f
@@ -151,14 +148,15 @@ guardParser str layout = let tlayout = tailElemLayout layout in
 
 exprOrGuardParser :: String -> LayoutInfo -> Parsec TokenStream u ExprOrGuard
 exprOrGuardParser str layout = let tlayout = tailElemLayout layout in
-    (reservedToken str layout >> (Left <$> exprParser 0 tlayout)) <|>
+    (reservedToken str layout >> Left <$> exprParser 0 tlayout) <|>
         (Right <$> layoutMany1 layout (guardParser str))
 
 exprWithTypeParser :: LayoutInfo -> Parsec TokenStream u Expr
 exprWithTypeParser layout = let tlayout = tailElemLayout layout in
-    do expr@(Expr pos _) <- exprParser 1 layout
+    do pos <- getPos
+       expr <- exprParser 1 layout
        do reservedToken "::" tlayout
-          typeName <- typeNameParaser tlayout
+          typeName <- typeWithClassInfoParser tlayout
           return $ exprWithType pos expr typeName
           <|> return expr
 
@@ -270,7 +268,7 @@ patternWithTypeParser layout = let tlayout = tailElemLayout layout in
     do pos <- getPos
        head <- patternParser 1 layout
        do reservedToken "::" tlayout
-          typeName <- typeNameParaser tlayout
+          typeName <- typeWithClassInfoParser tlayout
           return $ patternWithType pos head typeName
           <|> return head
 
@@ -329,58 +327,63 @@ listPatternParser layout = let tlayout = tailElemLayout layout in
 
 -- Type Name Parser
 
-typeNameParaser :: LayoutInfo -> Parsec TokenStream u DataType
-typeNameParaser layout = let tlayout = tailElemLayout layout in
-    liftM3 DataType getPos
-        (option [] $ try $ typeClassInfoParser layout)
-        (primTypeParser 0 tlayout)
+typeWithClassInfoParser :: LayoutInfo -> Parsec TokenStream u DataTypeWithClassInfo
+typeWithClassInfoParser layout = let tlayout = tailElemLayout layout in
+    liftM3 DataTypeWithClassInfo getPos (classInfoParser layout) (typeParser 0 tlayout)
 
-typeClassInfoParser :: LayoutInfo -> Parsec TokenStream u [TypeClassInfo]
-typeClassInfoParser layout = let tlayout = tailElemLayout layout in
+classInfoParser :: LayoutInfo -> Parsec TokenStream u [TypeClassInfo]
+classInfoParser layout = let tlayout = tailElemLayout layout in option [] $ try $
     do reservedToken "(" layout
-       body <- sepBy1 (liftM2 TypeClassInfo (cNameToken tlayout) (primTypeParser 0 tlayout))
+       body <- sepBy1 (liftM3 TypeClassInfo getPos (cNameToken tlayout) (typeParser 0 tlayout))
            (reservedToken "," tlayout)
        reservedToken ")" tlayout
        reservedToken "=>" tlayout
        return body
 
-primTypeParser :: Int -> LayoutInfo -> Parsec TokenStream u PrimDataType
-primTypeParser 0 = functionTypeParser
-primTypeParser 1 = choice.flip amap [composedTypeParser,primTypeParser 2]
-primTypeParser 2 = choice.flip amap [composedTypeParser1,listTypeParser,bracketTypeParser]
+typeParser :: Int -> LayoutInfo -> Parsec TokenStream u DataType
+typeParser 0 = functionTypeParser
+typeParser 1 = choice.flip amap [composedTypeParser,typeParser 2]
+typeParser 2 = choice.flip amap
+    [composedTypeParser1,listTypeParser,bracketTypeParser,variableTypeParser]
 
-functionTypeParser :: LayoutInfo -> Parsec TokenStream u PrimDataType
+functionTypeParser :: LayoutInfo -> Parsec TokenStream u DataType
 functionTypeParser layout = let tlayout = tailElemLayout layout in
-    chainr1 (primTypeParser 1 layout) $ reservedToken "->" tlayout >> return FunctionType
+    do pos <- getPos
+       f <- typeParser 1 layout
+       do reservedToken "->" tlayout
+          p <- typeParser 0 layout
+          return $ functionType pos f p
+          <|> return f
 
-composedTypeParser :: LayoutInfo -> Parsec TokenStream u PrimDataType
+composedTypeParser :: LayoutInfo -> Parsec TokenStream u DataType
 composedTypeParser layout = let tlayout = tailElemLayout layout in
-    liftM2 ComposedDataType (cNameToken layout) (many $ primTypeParser 2 tlayout)
+    liftM3 composedType getPos (cNameToken layout) (many $ typeParser 2 tlayout)
 
-composedTypeParser1 :: LayoutInfo -> Parsec TokenStream u PrimDataType
+composedTypeParser1 :: LayoutInfo -> Parsec TokenStream u DataType
 composedTypeParser1 layout = let tlayout = tailElemLayout layout in
-    liftM2 ComposedDataType (cNameToken layout) (return [])
+    liftM3 composedType getPos (cNameToken layout) (return [])
 
-listTypeParser :: LayoutInfo -> Parsec TokenStream u PrimDataType
+listTypeParser :: LayoutInfo -> Parsec TokenStream u DataType
 listTypeParser layout = let tlayout = tailElemLayout layout in
-    do reservedToken "[" layout
-       body <- primTypeParser 0 tlayout
+    do pos <- getPos
+       reservedToken "[" layout
+       body <- typeParser 0 tlayout
        reservedToken "]" tlayout
-       return $ ListType body
+       return $ listType pos body
 
-bracketTypeParser :: LayoutInfo -> Parsec TokenStream u PrimDataType
+bracketTypeParser :: LayoutInfo -> Parsec TokenStream u DataType
 bracketTypeParser layout = let tlayout = tailElemLayout layout in
-    do reservedToken "(" layout
-       body <- primTypeParser 0 tlayout
+    do pos <- getPos
+       reservedToken "(" layout
+       body <- typeParser 0 tlayout
        reservedToken ")" tlayout
-       return body
+       return $ bracketType pos body
+
+variableTypeParser :: LayoutInfo -> Parsec TokenStream u DataType
+variableTypeParser layout = liftM2 variableType getPos (unscopedNameToken layout)
 
 -- Global Parser
 
 globalParser :: Parsec TokenStream u Expr
-globalParser =
-    do emptyToken arbitraryLayout
-       result <- exprParser 0 arbitraryLayout
-       eof
-       return result
+globalParser = exprParser 0 arbitraryLayout <* eof
 
